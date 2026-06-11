@@ -76,7 +76,10 @@ resolve_name() {
 # stable, private, tmpfs-backed home for this session's state (enables --watch + a clean wipe)
 session_dir() {
   local base="${XDG_RUNTIME_DIR:-}"
-  [ -n "$base" ] && [ -d "$base" ] || base="/dev/shm/floo-$(id -u)"
+  # Fall back OFF world-writable /dev/shm: sshd's StrictModes refuses to read an
+  # AuthorizedPrincipalsFile whose parent dir is group/other-writable, which breaks cert auth for
+  # any client without a per-user runtime dir (cron/non-login). $HOME/.local/state is private.
+  [ -n "$base" ] && [ -d "$base" ] || base="${HOME:-/tmp}/.local/state"
   printf '%s/floo/%s' "$base" "$1"
 }
 
