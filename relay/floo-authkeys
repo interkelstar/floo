@@ -12,7 +12,7 @@
 # with its own throwaway key. Security rests on the gw account being powerless + the pairing
 # code, NOT on who holds a key to reach it.
 #
-# Invoked by sshd as: agents-support-authkeys <keytype> <keyblob-base64>
+# Invoked by sshd as: floo-authkeys <keytype> <keyblob-base64>
 set -u
 t="${1:-}"; k="${2:-}"
 case "$t" in

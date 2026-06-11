@@ -1,28 +1,28 @@
 #!/usr/bin/env bash
-# agents-support — operator CLI. Connect to a client box that has an OPEN support session,
+# floo-powder — operator CLI. Connect to a client box that has an OPEN support session,
 # for a read-only audit or a push upgrade. Vlad runs `connect` (and confirms the pairing
 # code); after that, plain `ssh <botname>` / `rsync <botname>:` work, and the bot can run
-# `agents-support exec <botname> < script` for the read-only audit.
+# `floo-powder exec <botname> < script` for the read-only audit.
 #
-#   agents-support ca-init                 one-time: create the operator CA + relay key, wire ~/.ssh
-#   agents-support list                    show client boxes with an open session (+ pairing code)
-#   agents-support connect <botname>       verify the code, pin the host key, mint a 60-min cert, open a shell
+#   floo-powder ca-init                 one-time: create the operator CA + relay key, wire ~/.ssh
+#   floo-powder list                    show client boxes with an open session (+ pairing code)
+#   floo-powder connect <botname>       verify the code, pin the host key, mint a 60-min cert, open a shell
 #       [--confirm CODE]                   supply the code non-interactively (when already verified)
 #       [--no-shell]                       just establish the session (then use ssh/rsync/exec)
-#   agents-support exec <botname>          run stdin on the box non-interactively (the bot/audit path)
-#   agents-support close <botname>         tear down operator-side routing for a box
-#   agents-support gc                      drop routing for sessions that are no longer live
+#   floo-powder exec <botname>          run stdin on the box non-interactively (the bot/audit path)
+#   floo-powder close <botname>         tear down operator-side routing for a box
+#   floo-powder gc                      drop routing for sessions that are no longer live
 set -euo pipefail
 
-ASX_HOME="${ASX_HOME:-$HOME/.config/agents-support}"
-CA="$ASX_HOME/ca/operator_ca"
-RELAY_KEY="$ASX_HOME/relay_id_ed25519"      # operator's CLIENT key, to auth to the gw account
-RELAY_HOSTKEY="$ASX_HOME/relay_hostkey"     # the relay's HOST key (pinned; deployed by install-relay.sh)
-SSH_DROPIN_DIR="$HOME/.ssh/agents-support.d"
-[ -f "$ASX_HOME/relay.env" ] && . "$ASX_HOME/relay.env"
-RELAY_HOST="${ASX_RELAY_HOST:-${RELAY_HOST:-relay.agents-deployed.com}}"
-RELAY_PORT="${ASX_RELAY_PORT:-${RELAY_PORT:-443}}"
-RELAY_USER="${ASX_RELAY_USER:-${RELAY_USER:-gw}}"
+FLOO_HOME="${FLOO_HOME:-$HOME/.config/floo}"
+CA="$FLOO_HOME/ca/operator_ca"
+RELAY_KEY="$FLOO_HOME/relay_id_ed25519"      # operator's CLIENT key, to auth to the gw account
+RELAY_HOSTKEY="$FLOO_HOME/relay_hostkey"     # the relay's HOST key (pinned; deployed by install-relay.sh)
+SSH_DROPIN_DIR="$HOME/.ssh/floo.d"
+[ -f "$FLOO_HOME/relay.env" ] && . "$FLOO_HOME/relay.env"
+RELAY_HOST="${FLOO_RELAY_HOST:-${RELAY_HOST:-relay.agents-deployed.com}}"
+RELAY_PORT="${FLOO_RELAY_PORT:-${RELAY_PORT:-443}}"
+RELAY_USER="${FLOO_RELAY_USER:-${RELAY_USER:-gw}}"
 
 if [ -t 1 ]; then B=$'\e[1m'; D=$'\e[2m'; G=$'\e[32m'; Y=$'\e[33m'; R=$'\e[31m'; X=$'\e[0m'; else B="" D="" G="" Y="" R="" X=""; fi
 die() { printf '%serror:%s %s\n' "$R" "$X" "$*" >&2; exit 1; }
@@ -40,27 +40,27 @@ ensure_ssh_wiring() {
 relay_ssh() {
   ssh -p "$RELAY_PORT" -i "$RELAY_KEY" -o IdentitiesOnly=yes \
       -o BatchMode=yes -o ConnectTimeout=12 \
-      -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile="$ASX_HOME/relay_known_hosts" \
+      -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile="$FLOO_HOME/relay_known_hosts" \
       "$RELAY_USER@$RELAY_HOST" "$@"
 }
 
 cmd_ca_init() {
-  mkdir -p "$ASX_HOME/ca" "$ASX_HOME/sessions" "$SSH_DROPIN_DIR"
-  chmod 700 "$ASX_HOME" "$ASX_HOME/ca" "$SSH_DROPIN_DIR"
-  [ -f "$CA" ]        || { ssh-keygen -t ed25519 -f "$CA" -N '' -q -C agents-support-operator-ca; echo "created operator CA"; }
-  [ -f "$RELAY_KEY" ] || { ssh-keygen -t ed25519 -f "$RELAY_KEY" -N '' -q -C agents-support-operator-relay; echo "created relay (client-auth) key"; }
+  mkdir -p "$FLOO_HOME/ca" "$FLOO_HOME/sessions" "$SSH_DROPIN_DIR"
+  chmod 700 "$FLOO_HOME" "$FLOO_HOME/ca" "$SSH_DROPIN_DIR"
+  [ -f "$CA" ]        || { ssh-keygen -t ed25519 -f "$CA" -N '' -q -C floo-powder-operator-ca; echo "created operator CA"; }
+  [ -f "$RELAY_KEY" ] || { ssh-keygen -t ed25519 -f "$RELAY_KEY" -N '' -q -C floo-powder-operator-relay; echo "created relay (client-auth) key"; }
   # the relay's HOST key: install-relay.sh deploys this same key as the relay's identity, and we
   # pin its pubkey here so the operator CLI rejects a MITM'd relay (accept-new refuses a mismatch).
-  [ -f "$RELAY_HOSTKEY" ] || { ssh-keygen -t ed25519 -f "$RELAY_HOSTKEY" -N '' -q -C agents-support-relay-host; echo "created relay HOST key"; }
+  [ -f "$RELAY_HOSTKEY" ] || { ssh-keygen -t ed25519 -f "$RELAY_HOSTKEY" -N '' -q -C floo-powder-relay-host; echo "created relay HOST key"; }
   chmod 600 "$CA" "$RELAY_KEY" "$RELAY_HOSTKEY"
   local rt; if [ "$RELAY_PORT" = 22 ]; then rt="$RELAY_HOST"; else rt="[$RELAY_HOST]:$RELAY_PORT"; fi
-  printf '%s %s\n' "$rt" "$(cat "$RELAY_HOSTKEY.pub")" > "$ASX_HOME/relay_known_hosts"
+  printf '%s %s\n' "$rt" "$(cat "$RELAY_HOSTKEY.pub")" > "$FLOO_HOME/relay_known_hosts"
   ensure_ssh_wiring
   echo "~/.ssh/config includes $SSH_DROPIN_DIR/*.conf; relay host key pinned for $rt"
   echo
-  echo "${B}Embed these public keys in the public support.sh:${X}"
-  echo "  ASX_OPERATOR_CA_PUB = $(cat "$CA.pub")"
-  echo "  ASX_RELAY_HOSTKEY   = $(cat "$RELAY_HOSTKEY.pub")"
+  echo "${B}Embed these public keys in the public floo:${X}"
+  echo "  FLOO_OPERATOR_CA = $(cat "$CA.pub")"
+  echo "  FLOO_RELAY_HOSTKEY   = $(cat "$RELAY_HOSTKEY.pub")"
 }
 
 cmd_list() {
@@ -80,7 +80,7 @@ cmd_connect() {
     -*) die "unknown flag $1";;
     *) bn="$1"; shift;;
   esac; done
-  [ -n "$bn" ] || die "usage: agents-support connect <botname>"
+  [ -n "$bn" ] || die "usage: floo-powder connect <botname>"
   valid_botname "$bn"
 
   local meta; meta="$(relay_ssh meta "$bn")" || die "no session for '$bn' on the relay (is it open?)"
@@ -107,19 +107,19 @@ cmd_connect() {
   fi
 
   ensure_ssh_wiring
-  local sdir="$ASX_HOME/sessions/$bn"; rm -rf "$sdir"; mkdir -p "$sdir"; chmod 700 "$sdir"
+  local sdir="$FLOO_HOME/sessions/$bn"; rm -rf "$sdir"; mkdir -p "$sdir"; chmod 700 "$sdir"
   printf '%s %s\n' "$bn" "$hostkey" > "$sdir/known_hosts"          # pin the client host key under the alias
   ssh-keygen -t ed25519 -f "$sdir/opkey" -N '' -q -C "op-$bn"
   ssh-keygen -s "$CA" -I "op-$bn-$(date -u +%Y%m%dT%H%M%SZ)" -n "$bn" -V +60m "$sdir/opkey.pub" >/dev/null
   echo "${D}minted a 60-minute certificate (principal=$bn)${X}"
 
   cat > "$SSH_DROPIN_DIR/$bn.conf" <<CONF
-# agents-support session for $bn — auto-managed, expires with the cert (≤60m). Safe to delete.
+# floo-powder session for $bn — auto-managed, expires with the cert (≤60m). Safe to delete.
 Host $bn
     HostName $bn
     HostKeyAlias $bn
     User $loginuser
-    ProxyCommand ssh -p "$RELAY_PORT" -i "$RELAY_KEY" -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile="$ASX_HOME/relay_known_hosts" "$RELAY_USER@$RELAY_HOST" route "$bn"
+    ProxyCommand ssh -p "$RELAY_PORT" -i "$RELAY_KEY" -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile="$FLOO_HOME/relay_known_hosts" "$RELAY_USER@$RELAY_HOST" route "$bn"
     IdentityFile "$sdir/opkey"
     CertificateFile "$sdir/opkey-cert.pub"
     IdentitiesOnly yes
@@ -129,21 +129,21 @@ Host $bn
 CONF
   chmod 600 "$SSH_DROPIN_DIR/$bn.conf"
   echo "${G}✓ session ready${X} — plain ${B}ssh $bn${X} / ${B}rsync … $bn:${X} now work (≤60 min)."
-  if [ "$shell" = 1 ]; then echo "${D}opening a shell… (they can watch via 'support.sh --watch')${X}"; exec ssh "$bn"; fi
+  if [ "$shell" = 1 ]; then echo "${D}opening a shell… (they can watch via 'floo --watch')${X}"; exec ssh "$bn"; fi
 }
 
 cmd_exec() {
-  local bn="${1:-}"; [ -n "$bn" ] || die "usage: agents-support exec <botname> < script"
+  local bn="${1:-}"; [ -n "$bn" ] || die "usage: floo-powder exec <botname> < script"
   valid_botname "$bn"
-  [ -f "$SSH_DROPIN_DIR/$bn.conf" ] || die "no active session for '$bn' — run 'agents-support connect $bn' first."
+  [ -f "$SSH_DROPIN_DIR/$bn.conf" ] || die "no active session for '$bn' — run 'floo-powder connect $bn' first."
   # the bot/audit path: feed a script over a non-interactive shell. Recorded on the client side.
   ssh -o BatchMode=yes "$bn" 'bash -s'
 }
 
 cmd_close() {
-  local bn="${1:-}"; [ -n "$bn" ] || die "usage: agents-support close <botname>"
+  local bn="${1:-}"; [ -n "$bn" ] || die "usage: floo-powder close <botname>"
   valid_botname "$bn"
-  rm -f "$SSH_DROPIN_DIR/$bn.conf"; rm -rf "$ASX_HOME/sessions/$bn"
+  rm -f "$SSH_DROPIN_DIR/$bn.conf"; rm -rf "$FLOO_HOME/sessions/$bn"
   echo "closed operator-side routing for '$bn' (the client's Ctrl-C is the real revoke)."
 }
 
@@ -152,7 +152,7 @@ cmd_gc() {
   shopt -s nullglob
   for conf in "$SSH_DROPIN_DIR"/*.conf; do
     local bn; bn="$(basename "${conf%.conf}")"
-    if ! grep -qx "$bn" <<<"$live"; then rm -f "$conf"; rm -rf "$ASX_HOME/sessions/$bn"; echo "gc: dropped stale '$bn'"; fi
+    if ! grep -qx "$bn" <<<"$live"; then rm -f "$conf"; rm -rf "$FLOO_HOME/sessions/$bn"; echo "gc: dropped stale '$bn'"; fi
   done
   echo "gc done."
 }

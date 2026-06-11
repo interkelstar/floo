@@ -2,13 +2,13 @@
 # Unit tests for the relay dispatcher + authkeys helper — no sshd, drives them directly.
 set -uo pipefail
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-ROUTE="$REPO/relay/agents-support-route"; AUTHKEYS="$REPO/relay/agents-support-authkeys"
+ROUTE="$REPO/relay/floo-route"; AUTHKEYS="$REPO/relay/floo-authkeys"
 P=0; F=0
 ok(){ printf '  \e[32mPASS\e[0m %s\n' "$1"; P=$((P+1)); }
 bad(){ printf '  \e[31mFAIL\e[0m %s\n' "$1"; F=$((F+1)); }
 
 SOCK="$(mktemp -d /dev/shm/asx-unit.XXXX)"
-export ASX_RELAY_SOCK_DIR="$SOCK"
+export FLOO_RELAY_SOCK_DIR="$SOCK"
 LISTENER=""
 cleanup(){ [ -n "$LISTENER" ] && kill "$LISTENER" 2>/dev/null; rm -rf "$SOCK"; }
 trap cleanup EXIT

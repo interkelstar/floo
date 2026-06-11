@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# agents-support — client-initiated, temporary, recorded support access.
+# floo — client-initiated, temporary, recorded support access.
 #
 # WHAT THIS DOES, IN ONE BREATH:
 #   You run this only when you want help. It makes YOUR box dial OUT to our relay and
@@ -13,7 +13,7 @@
 # DON'T TRUST US — READ US. This is one Bash file. Things worth confirming yourself:
 #   - It NEVER runs as root and asks for no password:   grep -n 'sudo\|doas' "$0"   -> nothing
 #   - The ONLY identity allowed in is our published CA public key, pasted in plain sight
-#     below (ASX_OPERATOR_CA_PUB). Only the matching PRIVATE key — which lives on the
+#     below (FLOO_OPERATOR_CA). Only the matching PRIVATE key — which lives on the
 #     operator's machine and is in no repo — can mint a login. You can SEE exactly whom
 #     you are authorizing.
 #   - Access lasts only while this process is alive. Ctrl-C = revoke. There is no daemon,
@@ -21,34 +21,34 @@
 #   - Every change to your SSH keys, services, or scheduled jobs is shown to you on exit.
 #
 # Usage:
-#   curl -fsSL https://raw.githubusercontent.com/interkelstar/agents-support/<commit>/support.sh | bash
-#   support.sh                 open a support session (default)
-#   support.sh --watch         attach a read-only live view to a session already running
-#   support.sh --status        print whether a session is currently open, then exit
-#   support.sh --help | --version
+#   curl -fsSL https://raw.githubusercontent.com/interkelstar/floo/<commit>/floo | bash
+#   floo                 open a support session (default)
+#   floo --watch         attach a read-only live view to a session already running
+#   floo --status        print whether a session is currently open, then exit
+#   floo --help | --version
 #
 set -uo pipefail
 umask 077   # everything we create (keys, config, recordings) is owner-only from birth
 
-ASX_VERSION="0.1.0"
+FLOO_VERSION="0.1.0"
 
 # ─── The disclosure: the ONLY key that can enter. Public by design. ──────────────────────
 # This is a *public* key. Publishing it is safe and is the whole point: you read it and
 # know precisely who you let in. Secrecy of this line buys nothing; its INTEGRITY is what
 # matters — if you fetched this script pinned to a commit hash over HTTPS, this line is the
 # one the operator published.
-ASX_OPERATOR_CA_PUB='ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAd4taLsP1dtyMFEBtRBp9k4BDAt7GOktyYVElm6S5Xx agents-support-operator-ca'
+FLOO_OPERATOR_CA='ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAID2/+aVkVLnEOP1rUsKso9o25pKNdjIrxnPNqwkJv6x4 floo-powder-operator-ca'
 
 # The relay's host PUBLIC key — PINNED so a hijacked/MITM'd relay.agents-deployed.com is rejected
 # rather than trusted on first contact. Without this pin, a network attacker who answers as the
 # relay could feed your registration to themselves. Public by design (host keys are public).
-ASX_RELAY_HOSTKEY="${ASX_RELAY_HOSTKEY:-ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIPpmnSbZmVmJ2ozHvqJQypJeWGH1oDdnmQGefLoOltqF agents-support-relay-host}"
+FLOO_RELAY_HOSTKEY="${FLOO_RELAY_HOSTKEY:-ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIMHZLwc4mkm8d+vT8+dERAIj2z4tiQo/8hkPPqwltF+F floo-powder-relay-host}"
 
 # ─── Where to dial out (overridable for testing via env). ────────────────────────────────
-ASX_RELAY_HOST="${ASX_RELAY_HOST:-relay.agents-deployed.com}"
-ASX_RELAY_PORT="${ASX_RELAY_PORT:-443}"      # 443 so it survives restrictive outbound firewalls
-ASX_RELAY_USER="${ASX_RELAY_USER:-gw}"       # a powerless, forwarding-only account on the relay
-ASX_RELAY_SOCK_DIR="${ASX_RELAY_SOCK_DIR:-/run/agents-support}"   # path namespace ON the relay
+FLOO_RELAY_HOST="${FLOO_RELAY_HOST:-relay.agents-deployed.com}"
+FLOO_RELAY_PORT="${FLOO_RELAY_PORT:-443}"      # 443 so it survives restrictive outbound firewalls
+FLOO_RELAY_USER="${FLOO_RELAY_USER:-gw}"       # a powerless, forwarding-only account on the relay
+FLOO_RELAY_SOCK_DIR="${FLOO_RELAY_SOCK_DIR:-/run/floo}"   # path namespace ON the relay
 
 # ─── Cosmetic ────────────────────────────────────────────────────────────────────────────
 if [ -t 1 ]; then B=$'\e[1m'; D=$'\e[2m'; G=$'\e[32m'; Y=$'\e[33m'; R=$'\e[31m'; X=$'\e[0m'
@@ -62,7 +62,7 @@ warn() { printf '%s⚠%s %s\n' "$Y" "$X" "$*"; }
 # Order: explicit override → deployment.json field → the Cockpit URL prefix → hostname
 # label → the Unix username (provisioning sets user = botname). All cheap, all local.
 resolve_botname() {
-  if [ -n "${ASX_BOTNAME:-}" ]; then printf '%s' "$ASX_BOTNAME"; return; fi
+  if [ -n "${FLOO_BOTNAME:-}" ]; then printf '%s' "$FLOO_BOTNAME"; return; fi
   local dep="$HOME/.openclaw/deployment.json" n=""
   if [ -f "$dep" ] && command -v jq >/dev/null 2>&1; then
     n="$(jq -r '.client.botname // empty' "$dep" 2>/dev/null)"
@@ -78,8 +78,8 @@ resolve_botname() {
 # stable, private, tmpfs-backed home for this session's state (enables --watch + a clean wipe)
 session_dir() {
   local base="${XDG_RUNTIME_DIR:-}"
-  [ -n "$base" ] && [ -d "$base" ] || base="/dev/shm/agents-support-$(id -u)"
-  printf '%s/agents-support/%s' "$base" "$1"
+  [ -n "$base" ] && [ -d "$base" ] || base="/dev/shm/floo-$(id -u)"
+  printf '%s/floo/%s' "$base" "$1"
 }
 
 # ─── Attack-surface snapshot — the honest part of the trust promise. ─────────────────────
@@ -114,18 +114,18 @@ PAIRCODE=""; BEFORE=""; AFTER=""; CONNECT_LOGGED=0
 
 build_endpoint() {
   mkdir -p "$WORKDIR/recording"
-  printf '%s\n' "$ASX_OPERATOR_CA_PUB" > "$WORKDIR/operator_ca.pub"
+  printf '%s\n' "$FLOO_OPERATOR_CA" > "$WORKDIR/operator_ca.pub"
 
   # pre-pin the relay's host key. ssh's accept-new still adds a genuinely-new host, but a
   # MISMATCH against this pin (a MITM presenting a different key) is refused.
-  if [ -n "${ASX_RELAY_HOSTKEY:-}" ]; then
-    local rt; if [ "$ASX_RELAY_PORT" = 22 ]; then rt="$ASX_RELAY_HOST"; else rt="[$ASX_RELAY_HOST]:$ASX_RELAY_PORT"; fi
-    printf '%s %s\n' "$rt" "$ASX_RELAY_HOSTKEY" > "$WORKDIR/relay_known_hosts"
+  if [ -n "${FLOO_RELAY_HOSTKEY:-}" ]; then
+    local rt; if [ "$FLOO_RELAY_PORT" = 22 ]; then rt="$FLOO_RELAY_HOST"; else rt="[$FLOO_RELAY_HOST]:$FLOO_RELAY_PORT"; fi
+    printf '%s %s\n' "$rt" "$FLOO_RELAY_HOSTKEY" > "$WORKDIR/relay_known_hosts"
   else
     warn "relay host key is not pinned — falling back to trust-on-first-use for the relay."
   fi
   printf '%s\n' "$BOTNAME" > "$WORKDIR/principals"      # the cert principal we will accept
-  ssh-keygen -t ed25519 -f "$WORKDIR/hostkey" -N '' -q -C "agents-support-$BOTNAME"
+  ssh-keygen -t ed25519 -f "$WORKDIR/hostkey" -N '' -q -C "floo-$BOTNAME"
 
   # the recorder: every command the operator runs, and its output, is teed to your disk.
   cat > "$WORKDIR/record-session" <<'REC'
@@ -141,7 +141,7 @@ marker="$ADIR/$$"; : > "$marker"; trap 'rm -f "$marker"' EXIT
 printf '%s %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "${SSH_ORIGINAL_COMMAND:-<interactive shell>}" >> "$DIR/sessions.log"
 stamp="$(date -u +%Y%m%dT%H%M%SZ)-$$"
 log="$RECDIR/$stamp.log"
-{ echo "=== agents-support session $stamp ==="; echo "from: ${SSH_CONNECTION:-?}"; echo "cmd : ${SSH_ORIGINAL_COMMAND:-<interactive shell>}"; echo; } >> "$log"
+{ echo "=== floo session $stamp ==="; echo "from: ${SSH_CONNECTION:-?}"; echo "cmd : ${SSH_ORIGINAL_COMMAND:-<interactive shell>}"; echo; } >> "$log"
 if [ -n "${SSH_ORIGINAL_COMMAND:-}" ]; then
   # non-interactive (audit/upgrade script piped in): put BOTH the commands AND their output in the
   # ONE saved log. (Previously the input went to a separate .stdin file that teardown never saved,
@@ -265,35 +265,35 @@ pairing_code() {
 }
 
 relay_ssh() {  # helper: run a one-shot command on the relay's gw account
-  ssh -p "$ASX_RELAY_PORT" \
+  ssh -p "$FLOO_RELAY_PORT" \
       -o BatchMode=yes -o ConnectTimeout=12 \
       -o ServerAliveInterval=5 -o ServerAliveCountMax=2 \
       -o StrictHostKeyChecking=accept-new \
       -o UserKnownHostsFile="$WORKDIR/relay_known_hosts" \
       -i "$WORKDIR/clientkey" \
-      "$ASX_RELAY_USER@$ASX_RELAY_HOST" "$@"
+      "$FLOO_RELAY_USER@$FLOO_RELAY_HOST" "$@"
 }
 
 register_and_tunnel() {
-  ssh-keygen -t ed25519 -f "$WORKDIR/clientkey" -N '' -q -C "agents-support-tunnel-$BOTNAME"
+  ssh-keygen -t ed25519 -f "$WORKDIR/clientkey" -N '' -q -C "floo-tunnel-$BOTNAME"
   local hostpub; hostpub="$(cat "$WORKDIR/hostkey.pub")"
 
   info "registering the session with the relay…"
   if ! relay_ssh register "$BOTNAME" "$PAIRCODE" "$(id -un)" "$hostpub"; then
-    warn "could not reach the relay at $ASX_RELAY_HOST:$ASX_RELAY_PORT — is the network up?"
+    warn "could not reach the relay at $FLOO_RELAY_HOST:$FLOO_RELAY_PORT — is the network up?"
     return 1
   fi
 
   # the dial-out itself: a reverse unix socket on the relay → our throwaway sshd. This
   # foreground-less process IS the access grant; killing it removes the relay socket
   # (relay sets StreamLocalBindUnlink) and ends all access.
-  setsid ssh -p "$ASX_RELAY_PORT" -N \
+  setsid ssh -p "$FLOO_RELAY_PORT" -N \
       -o BatchMode=yes -o ExitOnForwardFailure=yes \
       -o ServerAliveInterval=15 -o ServerAliveCountMax=3 \
       -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile="$WORKDIR/relay_known_hosts" \
       -i "$WORKDIR/clientkey" \
-      -R "$ASX_RELAY_SOCK_DIR/$BOTNAME.sock:127.0.0.1:$SSHD_PORT" \
-      "$ASX_RELAY_USER@$ASX_RELAY_HOST" &
+      -R "$FLOO_RELAY_SOCK_DIR/$BOTNAME.sock:127.0.0.1:$SSHD_PORT" \
+      "$FLOO_RELAY_USER@$FLOO_RELAY_HOST" &
   TUNNEL_PID=$!
   sleep 1.2
   kill -0 "$TUNNEL_PID" 2>/dev/null || { warn "the outbound tunnel did not stay up"; return 1; }
@@ -326,7 +326,7 @@ monitor() {
   done
 }
 
-# ─── Read-only watch attach (second window: `support.sh --watch`). ───────────────────────
+# ─── Read-only watch attach (second window: `floo --watch`). ───────────────────────
 watch_attach() {
   local dir; dir="$(session_dir "$BOTNAME")"
   [ -d "$dir" ] || { warn "no support session is open right now."; exit 1; }
@@ -457,7 +457,7 @@ teardown() {
       warn "these access-related surfaces CHANGED during the session — review them:"
       diff -u "$BEFORE" "$AFTER" 2>/dev/null | grep -E '^[+-]' | grep -vE '^(\+\+\+|---)' | sed 's/^/    /'
       # preserve the evidence (and the recording) outside tmpfs so it survives the wipe
-      local keep="$HOME/.agents-support-last-session"; mkdir -p "$keep" 2>/dev/null
+      local keep="$HOME/.floo-last-session"; mkdir -p "$keep" 2>/dev/null
       cp "$BEFORE" "$AFTER" "$keep/" 2>/dev/null
       cp -r "$WORKDIR/recording" "$keep/" 2>/dev/null
       warn "details + the full recording saved to: $keep"
@@ -465,7 +465,7 @@ teardown() {
   fi
 
   if [ "$CONNECT_LOGGED" = 1 ] || ls "$WORKDIR"/recording/*.log >/dev/null 2>&1; then
-    local keep="$HOME/.agents-support-last-session"; mkdir -p "$keep/recording" 2>/dev/null
+    local keep="$HOME/.floo-last-session"; mkdir -p "$keep/recording" 2>/dev/null
     cp "$WORKDIR"/recording/*.log "$keep/recording/" 2>/dev/null
     clean_recordings "$keep/recording"
     local rec; rec="$(ls -1t "$keep"/recording/*.log 2>/dev/null | head -1)"
@@ -482,7 +482,7 @@ run_session() {
   [ "$(id -u)" = 0 ] && warn "you are running as root; support is designed to run as your own user."
 
   say ""
-  say "${B}agents-support${X} — temporary, recorded help for ${B}$BOTNAME${X}"
+  say "${B}floo${X} — temporary, recorded help for ${B}$BOTNAME${X}"
   say "${D}Access lasts only while this window is open. Ctrl-C ends it. Nothing is installed.${X}"
   say ""
 
@@ -517,7 +517,7 @@ run_session() {
 usage() {
   # embedded (not sed'd from $0) so --help works under `curl … | bash`, where $0 is "bash"
   cat <<EOF
-agents-support $ASX_VERSION — client-initiated, temporary, recorded support access.
+floo $FLOO_VERSION — client-initiated, temporary, recorded support access.
 
 You run this only when you want help. Your box dials OUT to the relay and stands up a
 throwaway SSH endpoint that ONLY the operator's published CA key can enter. You get a
@@ -525,22 +525,22 @@ pairing code to read back; the session is recorded to your disk; Ctrl-C (or clos
 window) revokes it. Nothing is installed, nothing runs as root, nothing survives a reboot.
 
 Usage:
-  support.sh              open a support session (default)
-  support.sh --watch      attach a read-only live view to a session already running
-  support.sh --status     print whether a session is currently open, then exit
-  support.sh --help | --version
+  floo              open a support session (default)
+  floo --watch      attach a read-only live view to a session already running
+  floo --status     print whether a session is currently open, then exit
+  floo --help | --version
 
-Env overrides (testing): ASX_BOTNAME, ASX_RELAY_HOST, ASX_RELAY_PORT, ASX_RELAY_USER.
+Env overrides (testing): FLOO_BOTNAME, FLOO_RELAY_HOST, FLOO_RELAY_PORT, FLOO_RELAY_USER.
 EOF
 }
 
 main() {
   case "${1:-}" in
     -h|--help)    usage; exit 0 ;;
-    --version)    echo "agents-support $ASX_VERSION"; exit 0 ;;
+    --version)    echo "floo $FLOO_VERSION"; exit 0 ;;
   esac
   BOTNAME="$(resolve_botname)"
-  [ -n "$BOTNAME" ] || { warn "could not determine this box's name; set ASX_BOTNAME=…"; exit 1; }
+  [ -n "$BOTNAME" ] || { warn "could not determine this box's name; set FLOO_BOTNAME=…"; exit 1; }
   case "${1:-}" in
     --watch)   watch_attach ;;
     --status)  status_only ;;

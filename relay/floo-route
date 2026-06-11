@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# agents-support relay dispatcher — the ForceCommand for the `gw` account.
+# floo relay dispatcher — the ForceCommand for the `gw` account.
 #
 # This is the ONLY thing the gw account can do. gw has no shell, no TCP forwarding, and no
 # powers beyond what is dispatched here plus holding a reverse unix-socket forward. It runs
@@ -14,11 +14,11 @@
 #   list                                                 enumerate sessions (dead ones GC'd)
 set -u
 
-SOCKDIR="${ASX_RELAY_SOCK_DIR:-/run/agents-support}"
+SOCKDIR="${FLOO_RELAY_SOCK_DIR:-/run/floo}"
 
-log() { logger -t agents-support-route -- "$*" 2>/dev/null || true; }
+log() { logger -t floo-route -- "$*" 2>/dev/null || true; }
 valid_botname() { [[ "$1" =~ ^[a-z0-9][a-z0-9-]{0,62}$ ]]; }   # DNS label → can't escape SOCKDIR
-deny() { echo "agents-support: $1" >&2; log "deny: $1 (peer ${SSH_CONNECTION:-?})"; exit 1; }
+deny() { echo "floo: $1" >&2; log "deny: $1 (peer ${SSH_CONNECTION:-?})"; exit 1; }
 
 # A killed tunnel leaves a STALE socket file behind (sshd's StreamLocalBindUnlink only clears
 # one before the NEXT bind), so file-existence alone is misleading. Probe connectability.
