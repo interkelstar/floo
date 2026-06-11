@@ -66,6 +66,7 @@ uninstall() {
   rm -rf "$ETC" "$SOCKDIR"
   systemctl daemon-reload
   for p in "${PORT}" 443; do close_port "$p"; done
+  rm -f /etc/fail2ban/jail.d/floo-relay.local 2>/dev/null && command -v fail2ban-client >/dev/null 2>&1 && systemctl reload fail2ban 2>/dev/null || true
   id gw >/dev/null 2>&1 && { userdel -r gw 2>/dev/null || userdel gw 2>/dev/null || true; }
   if command -v semanage >/dev/null 2>&1; then
     for p in "${PORT}" 443; do semanage port -d -t ssh_port_t -p tcp "$p" 2>/dev/null || true; done
@@ -121,6 +122,12 @@ ListenAddress ::
 HostKey $ETC/relay_hostkey
 PidFile /run/floo-relay.pid
 LogLevel VERBOSE
+# DoS hardening: cap concurrent unauthenticated handshakes (global + per source), short budgets
+MaxStartups 10:50:60
+PerSourceMaxStartups 4
+PerSourceNetBlockSize 24
+LoginGraceTime 15
+MaxAuthTries 3
 AllowUsers gw
 PermitRootLogin no
 UsePAM no
@@ -182,6 +189,24 @@ systemctl enable --now floo-relay.service
 
 echo "==> opening $PORT/tcp"
 open_port "$PORT"
+
+# ── DoS hardening: a fail2ban jail for the public gw endpoint (best-effort; cleanly removable) ──
+if command -v fail2ban-client >/dev/null 2>&1 && [ -d /etc/fail2ban ]; then
+  mkdir -p /etc/fail2ban/jail.d
+  cat > /etc/fail2ban/jail.d/floo-relay.local <<JAIL
+[floo-relay]
+enabled      = true
+port         = $PORT
+filter       = sshd
+backend      = systemd
+journalmatch = _SYSTEMD_UNIT=floo-relay.service
+maxretry     = 5
+findtime     = 60
+bantime      = 600
+JAIL
+  systemctl reload fail2ban 2>/dev/null || systemctl restart fail2ban 2>/dev/null || true
+  echo "==> fail2ban jail 'floo-relay' enabled on :$PORT"
+fi
 
 echo
 echo "relay up on :$PORT — host key fingerprint (clients pin this via accept-new on first dial):"
