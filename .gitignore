@@ -1,0 +1,4 @@
+# operator-local state — never committed (CA private key lives ONLY on the operator box)
+*.log
+*-cert.pub
+/sessions/

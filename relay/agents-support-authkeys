@@ -1,0 +1,28 @@
+#!/usr/bin/env bash
+# AuthorizedKeysCommand for the relay's `gw` account.
+#
+# It echoes back whatever public key the client offered, so ANY key is accepted — but with
+# `restrict` (no pty, no agent/X11 forwarding, no user-rc) and only `port-forwarding`
+# re-enabled. The relay sshd's `Match User gw` block further narrows that to remote
+# unix-socket forwarding only and pins a ForceCommand. The net authority of a gw login is
+# therefore: open a reverse socket, or run the dispatcher — nothing else.
+#
+# Why accept any key instead of publishing a shared one? So no private key ever lives in
+# the public repo (nothing for a client to find and distrust), and each client authenticates
+# with its own throwaway key. Security rests on the gw account being powerless + the pairing
+# code, NOT on who holds a key to reach it.
+#
+# Invoked by sshd as: agents-support-authkeys <keytype> <keyblob-base64>
+set -u
+t="${1:-}"; k="${2:-}"
+case "$t" in
+  ssh-ed25519|ssh-rsa|ecdsa-sha2-*|sk-ssh-ed25519@openssh.com|sk-ecdsa-sha2-*) ;;
+  *) exit 0 ;;   # unknown type → emit nothing → auth fails
+esac
+[ -n "$k" ] || exit 0
+# Emit the bare key — authorization only. ALL confinement is done server-side by the relay
+# sshd's `Match User gw` block (AllowTcpForwarding no, AllowStreamLocalForwarding remote,
+# ForceCommand, PermitTTY no, no agent/X11/tun forwarding). We deliberately do NOT add the
+# `restrict` key option here: `restrict` disables the stream-local *listen* the reverse
+# tunnel needs, and `port-forwarding` does not re-grant it. The Match block is the authority.
+printf '%s %s\n' "$t" "$k"

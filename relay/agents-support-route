@@ -1,0 +1,106 @@
+#!/usr/bin/env bash
+# agents-support relay dispatcher — the ForceCommand for the `gw` account.
+#
+# This is the ONLY thing the gw account can do. gw has no shell, no TCP forwarding, and no
+# powers beyond what is dispatched here plus holding a reverse unix-socket forward. It runs
+# as the unprivileged gw user. The relay is a DUMB PIVOT: `route` splices bytes between the
+# operator and a client's already-encrypted SSH endpoint — it never sees session plaintext.
+#
+# Subcommands (taken from $SSH_ORIGINAL_COMMAND):
+#   register <botname> <CODE> <loginuser> <hostkey...>  client publishes pairing code + host key
+#   meta <botname>                                       operator reads it back to verify the code
+#   route <botname>                                      operator pivot: connect to the client socket
+#   deregister <botname>                                 client teardown removes its socket + meta
+#   list                                                 enumerate sessions (dead ones GC'd)
+set -u
+
+SOCKDIR="${ASX_RELAY_SOCK_DIR:-/run/agents-support}"
+
+log() { logger -t agents-support-route -- "$*" 2>/dev/null || true; }
+valid_botname() { [[ "$1" =~ ^[a-z0-9][a-z0-9-]{0,62}$ ]]; }   # DNS label → can't escape SOCKDIR
+deny() { echo "agents-support: $1" >&2; log "deny: $1 (peer ${SSH_CONNECTION:-?})"; exit 1; }
+
+# A killed tunnel leaves a STALE socket file behind (sshd's StreamLocalBindUnlink only clears
+# one before the NEXT bind), so file-existence alone is misleading. Probe connectability.
+# CRUCIAL: we only ever conclude DEAD on a *definitive* connection refusal (nc exit 1). Any
+# ambiguous result — nc missing/errored, a signal, a hung peer — is treated as LIVE, so a
+# probe failure can NEVER cause gc_dead() to delete a real, in-use session socket.
+socket_live() {
+  local p="$1"; [ -S "$p" ] || return 1
+  command -v nc >/dev/null 2>&1 || return 0          # can't probe → assume live, never GC blindly
+  timeout 2 nc -U "$p" </dev/null >/dev/null 2>&1
+  case "$?" in
+    0|124) return 0 ;;   # connected, or held open past the timeout → live
+    1)     return 1 ;;   # connection refused → genuinely stale/dead
+    *)     return 0 ;;   # ambiguous (nc error/signal) → assume live; do not delete
+  esac
+}
+# unlink stale socket + its meta (self-heals after a power loss / SIGKILL where deregister never ran)
+gc_dead() { local b="$1"; [ -e "$SOCKDIR/$b.sock" ] && ! socket_live "$SOCKDIR/$b.sock" && rm -f "$SOCKDIR/$b.sock" "$SOCKDIR/$b.meta"; return 0; }
+
+read -ra A <<<"${SSH_ORIGINAL_COMMAND:-}"
+cmd="${A[0]:-}"; bn="${A[1]:-}"
+
+case "$cmd" in
+  register)
+    valid_botname "$bn" || deny "bad botname"
+    code="${A[2]:-}"
+    [[ "$code" =~ ^[A-F0-9]{4}-[A-F0-9]{4}$ ]] || deny "bad pairing code"
+    loginuser="${A[3]:-}"
+    [[ "$loginuser" =~ ^[a-z_][a-z0-9_-]{0,31}$ ]] || deny "bad login user"
+    hostpub="${A[*]:4}"
+    [ -n "$hostpub" ] || deny "missing host key"
+    case "$hostpub" in ssh-ed25519\ *|ssh-rsa\ *|ecdsa-*\ *) ;; *) deny "bad host key" ;; esac
+    umask 077; mkdir -p "$SOCKDIR" 2>/dev/null   # metas are 0600 — pairing codes not world-readable
+    gc_dead "$bn"   # clear any stale leftovers for this name first
+    # refuse to clobber a session that is actually live (don't let a late/duplicate run hijack the meta)
+    socket_live "$SOCKDIR/$bn.sock" && deny "a live session already exists for $bn"
+    # The operator verifies the code out-of-band, so a racing rewrite of the meta only changes
+    # the code the operator sees — and a wrong code makes them abort, not connect.
+    {
+      echo "botname=$bn"
+      echo "code=$code"
+      echo "loginuser=$loginuser"
+      echo "registered=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+      echo "peer=${SSH_CONNECTION%% *}"
+      echo "hostkey=$hostpub"
+    } > "$SOCKDIR/$bn.meta.tmp" && mv "$SOCKDIR/$bn.meta.tmp" "$SOCKDIR/$bn.meta"
+    log "register $bn"
+    echo "registered $bn"
+    ;;
+
+  meta)
+    valid_botname "$bn" || deny "bad botname"
+    [ -f "$SOCKDIR/$bn.meta" ] || deny "no such session"
+    if socket_live "$SOCKDIR/$bn.sock"; then echo "socket=live"; else echo "socket=absent"; fi
+    cat "$SOCKDIR/$bn.meta"
+    ;;
+
+  route)
+    valid_botname "$bn" || deny "bad botname"
+    socket_live "$SOCKDIR/$bn.sock" || { gc_dead "$bn"; deny "no live socket for $bn"; }
+    log "route $bn -> ${SSH_CONNECTION%% *}"
+    exec nc -U "$SOCKDIR/$bn.sock"
+    ;;
+
+  deregister)
+    valid_botname "$bn" || deny "bad botname"
+    rm -f "$SOCKDIR/$bn.sock" "$SOCKDIR/$bn.meta"
+    log "deregister $bn"
+    echo "deregistered $bn"
+    ;;
+
+  list)
+    shopt -s nullglob
+    for m in "$SOCKDIR"/*.meta; do
+      b="$(basename "${m%.meta}")"
+      if socket_live "$SOCKDIR/$b.sock"; then live="live"; else live="absent"; gc_dead "$b"; [ -f "$m" ] || continue; fi
+      code="$(sed -n 's/^code=//p' "$m")"; reg="$(sed -n 's/^registered=//p' "$m")"
+      printf '%s\tsocket=%s\tcode=%s\tregistered=%s\n' "$b" "$live" "$code" "$reg"
+    done
+    ;;
+
+  *)
+    deny "unknown command"
+    ;;
+esac

@@ -1,0 +1,552 @@
+#!/usr/bin/env bash
+# agents-support — client-initiated, temporary, recorded support access.
+#
+# WHAT THIS DOES, IN ONE BREATH:
+#   You run this only when you want help. It makes YOUR box dial OUT to our relay and
+#   stand up a throwaway SSH endpoint that ONLY the holder of our published support key
+#   (the operator) can enter. While it runs you see a "technician connected" line and a
+#   pairing code to read back to us. The whole session is recorded to YOUR disk. When you
+#   press Ctrl-C (or close the window) the endpoint dies, the tunnel drops, the temporary
+#   keys are wiped, and you are shown whether anything on your box changed. Nothing is
+#   installed, nothing survives a reboot, nothing runs as root.
+#
+# DON'T TRUST US — READ US. This is one Bash file. Things worth confirming yourself:
+#   - It NEVER runs as root and asks for no password:   grep -n 'sudo\|doas' "$0"   -> nothing
+#   - The ONLY identity allowed in is our published CA public key, pasted in plain sight
+#     below (ASX_OPERATOR_CA_PUB). Only the matching PRIVATE key — which lives on the
+#     operator's machine and is in no repo — can mint a login. You can SEE exactly whom
+#     you are authorizing.
+#   - Access lasts only while this process is alive. Ctrl-C = revoke. There is no daemon,
+#     no @reboot, no systemd unit, no entry added to ~/.ssh/authorized_keys.
+#   - Every change to your SSH keys, services, or scheduled jobs is shown to you on exit.
+#
+# Usage:
+#   curl -fsSL https://raw.githubusercontent.com/interkelstar/agents-support/<commit>/support.sh | bash
+#   support.sh                 open a support session (default)
+#   support.sh --watch         attach a read-only live view to a session already running
+#   support.sh --status        print whether a session is currently open, then exit
+#   support.sh --help | --version
+#
+set -uo pipefail
+umask 077   # everything we create (keys, config, recordings) is owner-only from birth
+
+ASX_VERSION="0.1.0"
+
+# ─── The disclosure: the ONLY key that can enter. Public by design. ──────────────────────
+# This is a *public* key. Publishing it is safe and is the whole point: you read it and
+# know precisely who you let in. Secrecy of this line buys nothing; its INTEGRITY is what
+# matters — if you fetched this script pinned to a commit hash over HTTPS, this line is the
+# one the operator published.
+ASX_OPERATOR_CA_PUB='ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAd4taLsP1dtyMFEBtRBp9k4BDAt7GOktyYVElm6S5Xx agents-support-operator-ca'
+
+# The relay's host PUBLIC key — PINNED so a hijacked/MITM'd relay.agents-deployed.com is rejected
+# rather than trusted on first contact. Without this pin, a network attacker who answers as the
+# relay could feed your registration to themselves. Public by design (host keys are public).
+ASX_RELAY_HOSTKEY="${ASX_RELAY_HOSTKEY:-ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIPpmnSbZmVmJ2ozHvqJQypJeWGH1oDdnmQGefLoOltqF agents-support-relay-host}"
+
+# ─── Where to dial out (overridable for testing via env). ────────────────────────────────
+ASX_RELAY_HOST="${ASX_RELAY_HOST:-relay.agents-deployed.com}"
+ASX_RELAY_PORT="${ASX_RELAY_PORT:-443}"      # 443 so it survives restrictive outbound firewalls
+ASX_RELAY_USER="${ASX_RELAY_USER:-gw}"       # a powerless, forwarding-only account on the relay
+ASX_RELAY_SOCK_DIR="${ASX_RELAY_SOCK_DIR:-/run/agents-support}"   # path namespace ON the relay
+
+# ─── Cosmetic ────────────────────────────────────────────────────────────────────────────
+if [ -t 1 ]; then B=$'\e[1m'; D=$'\e[2m'; G=$'\e[32m'; Y=$'\e[33m'; R=$'\e[31m'; X=$'\e[0m'
+else B=""; D=""; G=""; Y=""; R=""; X=""; fi
+say()  { printf '%s\n' "$*"; }
+info() { printf '%s•%s %s\n' "$D" "$X" "$*"; }
+ok()   { printf '%s✓%s %s\n' "$G" "$X" "$*"; }
+warn() { printf '%s⚠%s %s\n' "$Y" "$X" "$*"; }
+
+# ─── Resolve the botname (our natural key: the box's unique name). ────────────────────────
+# Order: explicit override → deployment.json field → the Cockpit URL prefix → hostname
+# label → the Unix username (provisioning sets user = botname). All cheap, all local.
+resolve_botname() {
+  if [ -n "${ASX_BOTNAME:-}" ]; then printf '%s' "$ASX_BOTNAME"; return; fi
+  local dep="$HOME/.openclaw/deployment.json" n=""
+  if [ -f "$dep" ] && command -v jq >/dev/null 2>&1; then
+    n="$(jq -r '.client.botname // empty' "$dep" 2>/dev/null)"
+    [ -z "$n" ] && n="$(jq -r '.surfaces.cockpit.url // empty' "$dep" 2>/dev/null | sed -E 's#^https?://##; s#\..*##')"
+  fi
+  [ -z "$n" ] && case "$(hostname -f 2>/dev/null || hostname)" in
+    *.agents-deployed.com|*.kelstar.me) n="$(hostname -s 2>/dev/null)";;
+  esac
+  [ -z "$n" ] && n="$(id -un)"
+  printf '%s' "$n"
+}
+
+# stable, private, tmpfs-backed home for this session's state (enables --watch + a clean wipe)
+session_dir() {
+  local base="${XDG_RUNTIME_DIR:-}"
+  [ -n "$base" ] && [ -d "$base" ] || base="/dev/shm/agents-support-$(id -u)"
+  printf '%s/agents-support/%s' "$base" "$1"
+}
+
+# ─── Attack-surface snapshot — the honest part of the trust promise. ─────────────────────
+# We snapshot the three things a departing technician could use to get back in — SSH keys,
+# enabled services, scheduled jobs — before and after, and show you the diff on exit. This
+# is a *disclosure*, not a guarantee of prevention: a shell can change a system; what this
+# promises is that any such change to these surfaces is surfaced to you, not hidden.
+snapshot_surface() {
+  local out="$1"
+  {
+    echo "## authorized_keys"
+    local h ak
+    for h in "$HOME" /root /home/*; do
+      ak="$h/.ssh/authorized_keys"
+      [ -r "$ak" ] && { echo "# $ak"; cat "$ak"; }
+    done 2>/dev/null
+    echo "## enabled systemd user units"
+    systemctl --user list-unit-files --state=enabled --no-legend 2>/dev/null | awk '{print $1}' | sort
+    echo "## enabled systemd system units (readable subset)"
+    systemctl list-unit-files --state=enabled --no-legend 2>/dev/null | awk '{print $1}' | sort
+    echo "## user crontab"
+    crontab -l 2>/dev/null
+    echo "## /etc/crontab + /etc/cron.d + cron.* (readable)"
+    cat /etc/crontab /etc/cron.d/* /etc/cron.hourly/* /etc/cron.daily/* \
+        /etc/cron.weekly/* /etc/cron.monthly/* /etc/cron.yearly/* 2>/dev/null
+  } > "$out" 2>/dev/null
+}
+
+# ─── Build the throwaway SSH endpoint (in tmpfs; nothing on durable disk). ────────────────
+WORKDIR=""; SSHD_PID=""; TUNNEL_PID=""; MONITOR_PID=""; BOTNAME=""; SSHD_PORT=""
+PAIRCODE=""; BEFORE=""; AFTER=""; CONNECT_LOGGED=0
+
+build_endpoint() {
+  mkdir -p "$WORKDIR/recording"
+  printf '%s\n' "$ASX_OPERATOR_CA_PUB" > "$WORKDIR/operator_ca.pub"
+
+  # pre-pin the relay's host key. ssh's accept-new still adds a genuinely-new host, but a
+  # MISMATCH against this pin (a MITM presenting a different key) is refused.
+  if [ -n "${ASX_RELAY_HOSTKEY:-}" ]; then
+    local rt; if [ "$ASX_RELAY_PORT" = 22 ]; then rt="$ASX_RELAY_HOST"; else rt="[$ASX_RELAY_HOST]:$ASX_RELAY_PORT"; fi
+    printf '%s %s\n' "$rt" "$ASX_RELAY_HOSTKEY" > "$WORKDIR/relay_known_hosts"
+  else
+    warn "relay host key is not pinned — falling back to trust-on-first-use for the relay."
+  fi
+  printf '%s\n' "$BOTNAME" > "$WORKDIR/principals"      # the cert principal we will accept
+  ssh-keygen -t ed25519 -f "$WORKDIR/hostkey" -N '' -q -C "agents-support-$BOTNAME"
+
+  # the recorder: every command the operator runs, and its output, is teed to your disk.
+  cat > "$WORKDIR/record-session" <<'REC'
+#!/usr/bin/env bash
+# ForceCommand wrapper: this runs ONLY after a successful operator-cert login — so its presence
+# IS a real technician session, never a liveness probe (probes never authenticate). It records
+# the session to the client's disk and holds a marker file that drives the "● connected" display.
+set -u
+DIR="$(dirname "$0")"; RECDIR="$DIR/recording"; ADIR="$DIR/active"; mkdir -p "$RECDIR" "$ADIR"
+marker="$ADIR/$$"; : > "$marker"; trap 'rm -f "$marker"' EXIT
+# one durable line per authenticated session — lets the watcher notice even a sub-second
+# command (whose marker may appear+vanish between its 1s polls), so nothing is silently invisible
+printf '%s %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "${SSH_ORIGINAL_COMMAND:-<interactive shell>}" >> "$DIR/sessions.log"
+stamp="$(date -u +%Y%m%dT%H%M%SZ)-$$"
+log="$RECDIR/$stamp.log"
+{ echo "=== agents-support session $stamp ==="; echo "from: ${SSH_CONNECTION:-?}"; echo "cmd : ${SSH_ORIGINAL_COMMAND:-<interactive shell>}"; echo; } >> "$log"
+if [ -n "${SSH_ORIGINAL_COMMAND:-}" ]; then
+  # non-interactive (audit/upgrade script piped in): put BOTH the commands AND their output in the
+  # ONE saved log. (Previously the input went to a separate .stdin file that teardown never saved,
+  # so the recording showed output with no commands.)
+  in="$(cat)"
+  { echo "----- commands the operator ran -----"; printf '%s\n' "$in"; echo "----- output -----"; } >> "$log"
+  printf '%s' "$in" | { bash -c "$SSH_ORIGINAL_COMMAND"; } 2>&1 | tee -a "$log"
+  exit "${PIPESTATUS[1]}"
+fi
+# interactive shell. A support session must NEVER attach the operator's or client's existing
+# tmux: many shell rc files do `[[ -n $SSH_CONNECTION ]] && exec tmux ...` on login, which would
+# hijack a shared session (and a teardown kill could then take it — and anything in it — down).
+# Strip the SSH markers so that guard can't fire, then run the login shell on ssh's OWN pty
+# (native size, keys, and Ctrl-C). Run it as a CHILD (not exec) so the EXIT trap clears the marker.
+trap '' INT                                         # Ctrl-C interrupts the shell's command, never this wrapper
+unset SSH_CONNECTION SSH_CLIENT SSH_TTY             # defeat SSH-auto-tmux in the user's shell rc
+if command -v script >/dev/null 2>&1; then
+  script -q -a "$log" -c "${SHELL:-/bin/bash} -l"    # keystroke-recorded where util-linux `script` exists
+else
+  # IMPORTANT: write the relay to a file and run it. `python3 - <<'PY'` would make the heredoc
+  # Python's STDIN, so the relay could not read the operator's keystrokes (instant EOF → it broke,
+  # then blocked in waitpid for a shell starved of input = the "stuck on opening a shell" hang).
+  cat > "$DIR/relay.py" <<'PY'
+# Record the interactive session by relaying ssh's pty through an inner pty we can tee. Safe now
+# that SSH-auto-tmux is disabled (the earlier hang was tmux on a mis-sized pty, not the relay).
+# Match the terminal size + forward SIGWINCH so the size is right; ignore INT/QUIT so Ctrl-C is
+# passed to the shell as a byte (raw mode delivers ^C, the shell handles it) and never crashes us.
+import os, pty, sys, tty, termios, fcntl, signal, select, struct
+log = open(sys.argv[1], "ab", buffering=0); shell = sys.argv[2]
+for s in (signal.SIGINT, signal.SIGQUIT):
+    try: signal.signal(s, signal.SIG_IGN)
+    except Exception: pass
+def winsz(fd):
+    try: return fcntl.ioctl(fd, termios.TIOCGWINSZ, b"\0" * 8)
+    except Exception: return struct.pack("HHHH", 24, 80, 0, 0)
+pid, fd = pty.fork()
+if pid == 0:
+    os.execvp(shell, [shell, "-l"]); os._exit(127)
+def sync(*_):
+    try: fcntl.ioctl(fd, termios.TIOCSWINSZ, winsz(0))
+    except Exception: pass
+sync()
+try: signal.signal(signal.SIGWINCH, sync)
+except Exception: pass
+old = None
+try: old = termios.tcgetattr(0); tty.setraw(0)
+except Exception: pass
+try:
+    while True:
+        try: r, _, _ = select.select([0, fd], [], [])
+        except (InterruptedError, OSError): continue
+        if 0 in r:
+            try: d = os.read(0, 65536)
+            except OSError: d = b""
+            if not d: break
+            try: os.write(fd, d)
+            except OSError: break
+        if fd in r:
+            try: d = os.read(fd, 65536)
+            except OSError: break
+            if not d: break
+            os.write(1, d)
+            try: log.write(d)
+            except Exception: pass
+finally:
+    if old is not None:
+        try: termios.tcsetattr(0, termios.TCSADRAIN, old)
+        except Exception: pass
+    try: os.waitpid(pid, 0)
+    except Exception: pass
+PY
+  python3 "$DIR/relay.py" "$log" "${SHELL:-/bin/bash}"   # stdin stays the operator's terminal
+fi
+REC
+  chmod 700 "$WORKDIR/record-session"
+
+  # pick a free localhost port for the throwaway sshd
+  SSHD_PORT="$(python3 -c 'import socket;s=socket.socket();s.bind(("127.0.0.1",0));print(s.getsockname()[1]);s.close()' 2>/dev/null || echo $(( (RANDOM % 20000) + 20000 )))"
+
+  cat > "$WORKDIR/sshd_config" <<CFG
+Port $SSHD_PORT
+ListenAddress 127.0.0.1
+HostKey $WORKDIR/hostkey
+PidFile $WORKDIR/sshd.pid
+# the box's auth rests ENTIRELY on the operator CA below — no passwords, no PAM, no aging
+UsePAM no
+PasswordAuthentication no
+KbdInteractiveAuthentication no
+ChallengeResponseAuthentication no
+PubkeyAuthentication yes
+AuthenticationMethods publickey
+TrustedUserCAKeys $WORKDIR/operator_ca.pub
+AuthorizedPrincipalsFile $WORKDIR/principals
+AuthorizedKeysFile /nonexistent
+AllowUsers $(id -un)
+# operator gets a shell to help you, nothing more — no forwarding back through your box
+AllowTcpForwarding no
+AllowStreamLocalForwarding no
+AllowAgentForwarding no
+X11Forwarding no
+PermitTunnel no
+PermitTTY yes
+ForceCommand $WORKDIR/record-session
+LogLevel VERBOSE
+PermitRootLogin no
+CFG
+}
+
+start_sshd() {
+  # own process group (setsid) so teardown can kill the listener AND every connection it forks
+  setsid /usr/sbin/sshd -D -f "$WORKDIR/sshd_config" -E "$WORKDIR/sshd.log" &
+  SSHD_PID=$!
+  sleep 0.4
+  kill -0 "$SSHD_PID" 2>/dev/null || { warn "could not start the local endpoint"; cat "$WORKDIR/sshd.log" 2>/dev/null; return 1; }
+}
+
+pairing_code() {
+  # short human code the operator must read back to you; binds the relay record to THIS run
+  PAIRCODE="$(head -c4 /dev/urandom | od -An -tx1 | tr -d ' \n' | tr 'a-f' 'A-F')"
+  PAIRCODE="${PAIRCODE:0:4}-${PAIRCODE:4:4}"
+}
+
+relay_ssh() {  # helper: run a one-shot command on the relay's gw account
+  ssh -p "$ASX_RELAY_PORT" \
+      -o BatchMode=yes -o ConnectTimeout=12 \
+      -o ServerAliveInterval=5 -o ServerAliveCountMax=2 \
+      -o StrictHostKeyChecking=accept-new \
+      -o UserKnownHostsFile="$WORKDIR/relay_known_hosts" \
+      -i "$WORKDIR/clientkey" \
+      "$ASX_RELAY_USER@$ASX_RELAY_HOST" "$@"
+}
+
+register_and_tunnel() {
+  ssh-keygen -t ed25519 -f "$WORKDIR/clientkey" -N '' -q -C "agents-support-tunnel-$BOTNAME"
+  local hostpub; hostpub="$(cat "$WORKDIR/hostkey.pub")"
+
+  info "registering the session with the relay…"
+  if ! relay_ssh register "$BOTNAME" "$PAIRCODE" "$(id -un)" "$hostpub"; then
+    warn "could not reach the relay at $ASX_RELAY_HOST:$ASX_RELAY_PORT — is the network up?"
+    return 1
+  fi
+
+  # the dial-out itself: a reverse unix socket on the relay → our throwaway sshd. This
+  # foreground-less process IS the access grant; killing it removes the relay socket
+  # (relay sets StreamLocalBindUnlink) and ends all access.
+  setsid ssh -p "$ASX_RELAY_PORT" -N \
+      -o BatchMode=yes -o ExitOnForwardFailure=yes \
+      -o ServerAliveInterval=15 -o ServerAliveCountMax=3 \
+      -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile="$WORKDIR/relay_known_hosts" \
+      -i "$WORKDIR/clientkey" \
+      -R "$ASX_RELAY_SOCK_DIR/$BOTNAME.sock:127.0.0.1:$SSHD_PORT" \
+      "$ASX_RELAY_USER@$ASX_RELAY_HOST" &
+  TUNNEL_PID=$!
+  sleep 1.2
+  kill -0 "$TUNNEL_PID" 2>/dev/null || { warn "the outbound tunnel did not stay up"; return 1; }
+}
+
+# ─── Live status (the client's own window): connection + recording activity. ──────────────
+monitor() {
+  printf '%s\n' "$$" > "$WORKDIR/watch.pid"; mkdir -p "$WORKDIR/active"
+  # Two signals, both written by the recorder ONLY after a cert login (so probes never trigger
+  # either): a per-session "started" line in sessions.log (durable — catches even a sub-second
+  # command), and a live PID marker (for "is one running right now", driving the finish debounce).
+  local shown=0 idle=0 seen live m p now
+  seen="$( [ -f "$WORKDIR/sessions.log" ] && wc -l < "$WORKDIR/sessions.log" || echo 0 )"
+  while kill -0 "$SSHD_PID" 2>/dev/null && kill -0 "$TUNNEL_PID" 2>/dev/null; do
+    for m in "$WORKDIR"/active/*; do
+      [ -e "$m" ] || continue; p="$(basename "$m")"; kill -0 "$p" 2>/dev/null || rm -f "$m"
+    done
+    live="$(ls "$WORKDIR/active" 2>/dev/null | wc -l)"
+    now="$( [ -f "$WORKDIR/sessions.log" ] && wc -l < "$WORKDIR/sessions.log" || echo 0 )"
+    if [ "${now:-0}" -gt "${seen:-0}" ] || [ "${live:-0}" -gt 0 ]; then
+      seen="$now"; idle=0
+      [ "$shown" = 0 ] && { printf '%s● a technician is connected%s\n' "$G" "$X"; shown=1; CONNECT_LOGGED=1; }
+    elif [ "$shown" = 1 ]; then
+      # collapse a burst of quick commands into one "connected … finished"; announce departure
+      # only after ~8s with no live session and no new one starting.
+      idle=$((idle + 1))
+      [ "$idle" -ge 8 ] && { printf '%s○ technician finished — press Ctrl-C to close, or leave open if they reconnect%s\n' "$D" "$X"; shown=0; idle=0; }
+    fi
+    sleep 1
+  done
+}
+
+# ─── Read-only watch attach (second window: `support.sh --watch`). ───────────────────────
+watch_attach() {
+  local dir; dir="$(session_dir "$BOTNAME")"
+  [ -d "$dir" ] || { warn "no support session is open right now."; exit 1; }
+  ok "attached read-only to the $BOTNAME support session — what the technician runs scrolls below."
+  say "${D}(Ctrl-C just closes this view; it does NOT end the session.)${X}"
+  # follow whatever recordings exist now and appear later
+  tail -n +1 -F "$dir"/recording/*.log 2>/dev/null
+}
+
+status_only() {
+  local dir; dir="$(session_dir "$BOTNAME")"
+  if [ -d "$dir" ] && [ -f "$dir/watch.pid" ] && kill -0 "$(cat "$dir/watch.pid" 2>/dev/null)" 2>/dev/null; then
+    ok "a support session for '$BOTNAME' is OPEN (pid $(cat "$dir/watch.pid"))."; exit 0
+  fi
+  info "no support session for '$BOTNAME' is open."; exit 1
+}
+
+# ─── Make a recording readable: strip terminal control sequences. ────────────────────────
+# The raw recording is the live terminal stream (zsh prompt colors, cursor moves, OSC
+# shell-integration markers), which is noise in an editor and makes `cat` jump the screen.
+# We strip it to plain, cat-safe text — far more useful as an audit/disclosure log.
+clean_recordings() {
+  local d="$1"; [ -d "$d" ] || return 0
+  command -v python3 >/dev/null 2>&1 || return 0
+  python3 - "$d" <<'PY'
+import sys, os, re
+# A tiny terminal emulator: replay the recorded stream the way a terminal would DISPLAY it
+# (apply CR, cursor moves, and erase-line), so the line-editor's per-keystroke redraws and
+# autosuggestions collapse into the final visible line. A naive escape-strip would instead pile
+# up every redraw — producing doubled letters and phantom commands you never ran.
+def render(data):
+    text = data.decode('utf-8', 'replace')
+    lines=[]; cur=[]; col=0; i=0; n=len(text)
+    def put(ch):
+        nonlocal col
+        while len(cur) <= col: cur.append(' ')
+        cur[col]=ch; col+=1
+    while i < n:
+        ch = text[i]
+        if ch == '\x1b':
+            if i+1 < n and text[i+1] == '[':                     # CSI
+                j=i+2
+                while j<n and text[j] in '0123456789;?': j+=1
+                while j<n and ' ' <= text[j] <= '/': j+=1
+                if j<n:
+                    f=text[j]; p=re.sub(r'\?','',text[i+2:j])
+                    nums=[int(x) for x in p.split(';') if x.isdigit()] or [0]
+                    if f=='K':
+                        m=nums[0]
+                        if m==0: del cur[col:]
+                        elif m==1:
+                            for k in range(min(col+1,len(cur))): cur[k]=' '
+                        else: cur[:]=[]
+                    elif f=='C': col+=(nums[0] or 1)
+                    elif f=='D': col=max(0,col-(nums[0] or 1))
+                    elif f=='G': col=max(0,(nums[0] or 1)-1)
+                    elif f in ('H','f'): col=0
+                    i=j+1; continue
+                i=j; continue
+            if i+1 < n and text[i+1] == ']':                     # OSC: skip to BEL/ST
+                j=i+2
+                while j<n and text[j] not in '\x07\x1b': j+=1
+                if j<n and text[j]=='\x1b' and j+1<n and text[j+1]=='\\': j+=1
+                i=j+1; continue
+            i+=2; continue
+        if ch=='\r': col=0; i+=1; continue
+        if ch=='\n': lines.append(''.join(cur).rstrip()); cur=[]; col=0; i+=1; continue
+        if ch=='\b': col=max(0,col-1); i+=1; continue
+        if ch=='\t': put(' '); i+=1; continue
+        if ord(ch) < 32: i+=1; continue
+        put(ch); i+=1
+    if cur: lines.append(''.join(cur).rstrip())
+    res=[]; blank=0
+    for ln in lines:
+        if ln.strip()=='':
+            blank+=1
+            if blank<=1: res.append('')
+        else:
+            blank=0; res.append(ln)
+    return ('\n'.join(res).strip()+'\n').encode('utf-8','replace')
+d=sys.argv[1]
+for fn in os.listdir(d):
+    if not fn.endswith('.log'): continue
+    p=os.path.join(d,fn)
+    try: b=open(p,'rb').read()
+    except Exception: continue
+    try: open(p,'wb').write(render(b))
+    except Exception: pass
+PY
+}
+
+# ─── Teardown: the revoke. Runs on Ctrl-C, on close, on any exit. ────────────────────────
+teardown() {
+  trap - EXIT INT TERM HUP
+  echo
+  info "closing the support session…"
+  # kill whole process groups (negative pid) so no forked sshd/ssh child is orphaned
+  [ -n "$MONITOR_PID" ] && kill "$MONITOR_PID" 2>/dev/null
+  [ -n "$TUNNEL_PID" ] && kill -TERM "-$TUNNEL_PID" 2>/dev/null
+  [ -n "$SSHD_PID" ]   && kill -TERM "-$SSHD_PID"   2>/dev/null
+  sleep 0.5
+  [ -n "$TUNNEL_PID" ] && kill -KILL "-$TUNNEL_PID" 2>/dev/null
+  [ -n "$SSHD_PID" ]   && kill -KILL "-$SSHD_PID"   2>/dev/null
+
+  # tidy up the relay: drop our (now-dead) socket + registration. Best-effort.
+  local dereg_ok=0
+  [ -f "$WORKDIR/clientkey" ] && relay_ssh deregister "$BOTNAME" >/dev/null 2>&1 && dereg_ok=1
+
+  # THE REVOKE is the local endpoint being down — that, not the relay socket, is the access path.
+  # Confirm it, retrying a harder kill if needed; only then claim revoked.
+  if [ -n "$SSHD_PORT" ] && command -v ss >/dev/null 2>&1 && ss -tlnH "( sport = :$SSHD_PORT )" 2>/dev/null | grep -q .; then
+    warn "the local endpoint port $SSHD_PORT is still bound — killing harder"
+    [ -f "$WORKDIR/sshd.pid" ] && kill -KILL "$(cat "$WORKDIR/sshd.pid" 2>/dev/null)" 2>/dev/null; sleep 0.3
+  fi
+  if [ -n "$SSHD_PORT" ] && command -v ss >/dev/null 2>&1 && ss -tlnH "( sport = :$SSHD_PORT )" 2>/dev/null | grep -q .; then
+    warn "could NOT confirm the endpoint is down. If unsure, reboot — nothing survives a reboot."
+  else
+    ok "access revoked — the support endpoint is down; only a reboot-proof, no-listener state remains."
+    [ "$dereg_ok" = 1 ] && info "relay entry removed." || info "the relay entry points to a now-dead endpoint and will be auto-cleaned."
+  fi
+
+  # the disclosure: did anything change?
+  if [ -n "$BEFORE" ] && [ -f "$BEFORE" ]; then
+    AFTER="$WORKDIR/after.txt"; snapshot_surface "$AFTER"
+    if diff -q "$BEFORE" "$AFTER" >/dev/null 2>&1; then
+      ok "verified: your SSH keys, enabled services, and scheduled jobs are unchanged."
+    else
+      warn "these access-related surfaces CHANGED during the session — review them:"
+      diff -u "$BEFORE" "$AFTER" 2>/dev/null | grep -E '^[+-]' | grep -vE '^(\+\+\+|---)' | sed 's/^/    /'
+      # preserve the evidence (and the recording) outside tmpfs so it survives the wipe
+      local keep="$HOME/.agents-support-last-session"; mkdir -p "$keep" 2>/dev/null
+      cp "$BEFORE" "$AFTER" "$keep/" 2>/dev/null
+      cp -r "$WORKDIR/recording" "$keep/" 2>/dev/null
+      warn "details + the full recording saved to: $keep"
+    fi
+  fi
+
+  if [ "$CONNECT_LOGGED" = 1 ] || ls "$WORKDIR"/recording/*.log >/dev/null 2>&1; then
+    local keep="$HOME/.agents-support-last-session"; mkdir -p "$keep/recording" 2>/dev/null
+    cp "$WORKDIR"/recording/*.log "$keep/recording/" 2>/dev/null
+    clean_recordings "$keep/recording"
+    local rec; rec="$(ls -1t "$keep"/recording/*.log 2>/dev/null | head -1)"
+    [ -n "$rec" ] && info "readable session recording: ${B}$rec${X}"
+  fi
+
+  rm -rf "$WORKDIR" 2>/dev/null   # wipe the ephemeral keys + config
+  ok "done. nothing is left running; a reboot would change nothing."
+}
+
+run_session() {
+  command -v ssh >/dev/null && command -v ssh-keygen >/dev/null && [ -x /usr/sbin/sshd ] || {
+    warn "this box is missing ssh/sshd — cannot open a support session."; exit 1; }
+  [ "$(id -u)" = 0 ] && warn "you are running as root; support is designed to run as your own user."
+
+  say ""
+  say "${B}agents-support${X} — temporary, recorded help for ${B}$BOTNAME${X}"
+  say "${D}Access lasts only while this window is open. Ctrl-C ends it. Nothing is installed.${X}"
+  say ""
+
+  WORKDIR="$(session_dir "$BOTNAME")"
+  # refuse a pre-planted symlink (a local attacker redirecting our key/recording writes), both
+  # before and after creation (umask 077 already makes the dirs owner-only).
+  [ -L "$WORKDIR" ] && { warn "session dir $WORKDIR is a symlink — refusing."; exit 1; }
+  rm -rf "$WORKDIR"; mkdir -p "$WORKDIR/recording" || { warn "cannot create session dir."; exit 1; }
+  [ -L "$WORKDIR" ] && { warn "session dir became a symlink — refusing."; exit 1; }
+  chmod 700 "$(dirname "$WORKDIR")" "$WORKDIR"
+  BEFORE="$WORKDIR/before.txt"; snapshot_surface "$BEFORE"
+  build_endpoint
+  start_sshd      || { teardown; exit 1; }
+  pairing_code
+  register_and_tunnel || { teardown; exit 1; }
+
+  say ""
+  ok "your box is now reachable by the operator — and ONLY by the operator's published key."
+  say ""
+  say "  ${B}Read this code back to whoever is helping you:${X}   ${B}$PAIRCODE${X}"
+  say "  ${D}They must repeat it before connecting. If their copy doesn't match, do NOT proceed —${X}"
+  say "  ${D}it means someone else is trying to answer. Just close this window.${X}"
+  say ""
+  info "watching for the technician to connect… (open a second window and run this with --watch to see what they do)"
+  say ""
+
+  monitor & MONITOR_PID=$!
+  # block until the tunnel or endpoint dies, or the user interrupts
+  wait "$TUNNEL_PID" 2>/dev/null
+}
+
+usage() {
+  # embedded (not sed'd from $0) so --help works under `curl … | bash`, where $0 is "bash"
+  cat <<EOF
+agents-support $ASX_VERSION — client-initiated, temporary, recorded support access.
+
+You run this only when you want help. Your box dials OUT to the relay and stands up a
+throwaway SSH endpoint that ONLY the operator's published CA key can enter. You get a
+pairing code to read back; the session is recorded to your disk; Ctrl-C (or closing the
+window) revokes it. Nothing is installed, nothing runs as root, nothing survives a reboot.
+
+Usage:
+  support.sh              open a support session (default)
+  support.sh --watch      attach a read-only live view to a session already running
+  support.sh --status     print whether a session is currently open, then exit
+  support.sh --help | --version
+
+Env overrides (testing): ASX_BOTNAME, ASX_RELAY_HOST, ASX_RELAY_PORT, ASX_RELAY_USER.
+EOF
+}
+
+main() {
+  case "${1:-}" in
+    -h|--help)    usage; exit 0 ;;
+    --version)    echo "agents-support $ASX_VERSION"; exit 0 ;;
+  esac
+  BOTNAME="$(resolve_botname)"
+  [ -n "$BOTNAME" ] || { warn "could not determine this box's name; set ASX_BOTNAME=…"; exit 1; }
+  case "${1:-}" in
+    --watch)   watch_attach ;;
+    --status)  status_only ;;
+    "")        trap 'teardown' EXIT; trap 'exit 130' INT TERM HUP; run_session ;;
+    *)         warn "unknown option: $1"; usage; exit 1 ;;
+  esac
+}
+
+main "$@"

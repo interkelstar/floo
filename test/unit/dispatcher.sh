@@ -1,0 +1,52 @@
+#!/usr/bin/env bash
+# Unit tests for the relay dispatcher + authkeys helper — no sshd, drives them directly.
+set -uo pipefail
+REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+ROUTE="$REPO/relay/agents-support-route"; AUTHKEYS="$REPO/relay/agents-support-authkeys"
+P=0; F=0
+ok(){ printf '  \e[32mPASS\e[0m %s\n' "$1"; P=$((P+1)); }
+bad(){ printf '  \e[31mFAIL\e[0m %s\n' "$1"; F=$((F+1)); }
+
+SOCK="$(mktemp -d /dev/shm/asx-unit.XXXX)"
+export ASX_RELAY_SOCK_DIR="$SOCK"
+LISTENER=""
+cleanup(){ [ -n "$LISTENER" ] && kill "$LISTENER" 2>/dev/null; rm -rf "$SOCK"; }
+trap cleanup EXIT
+route(){ SSH_ORIGINAL_COMMAND="$*" SSH_CONNECTION="1.2.3.4 5 6 7" bash "$ROUTE"; }
+
+echo "=== dispatcher ==="
+HK="ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAtestkeyblob comment@host"
+
+route register testbot AB12-CD34 kelstar $HK >/dev/null 2>&1 \
+  && [ -f "$SOCK/testbot.meta" ] && ok "register writes a meta file" || bad "register failed"
+grep -q '^code=AB12-CD34' "$SOCK/testbot.meta" && ok "meta records the pairing code" || bad "code not in meta"
+grep -q '^loginuser=kelstar' "$SOCK/testbot.meta" && ok "meta records the login user" || bad "loginuser not in meta"
+
+route register 'bad/name' AB12-CD34 kelstar $HK >/dev/null 2>&1 && bad "accepted path-traversal botname" || ok "rejects an invalid botname"
+route register testbot NOTACODE kelstar $HK >/dev/null 2>&1 && bad "accepted a malformed code" || ok "rejects a malformed pairing code"
+route register testbot AB12-CD34 'root;rm' $HK >/dev/null 2>&1 && bad "accepted a bad login user" || ok "rejects an invalid login user"
+
+out="$(route meta testbot 2>/dev/null)"
+grep -q 'socket=absent' <<<"$out" && ok "meta reports socket=absent when no tunnel is up" || bad "meta should report absent"
+route meta nosuch >/dev/null 2>&1 && bad "meta on unknown session succeeded" || ok "meta denies an unknown session"
+route route testbot >/dev/null 2>&1 && bad "route succeeded with no live socket" || ok "route denies when the socket isn't live"
+
+# a real (live) listener → socket_live must report it as live
+nc -lkU "$SOCK/testbot.sock" >/dev/null 2>&1 & LISTENER=$!; sleep 0.4
+out="$(route meta testbot 2>/dev/null)"
+grep -q 'socket=live' <<<"$out" && ok "meta reports socket=live against a real listener" || bad "meta missed a live socket"
+kill "$LISTENER" 2>/dev/null; LISTENER=""; rm -f "$SOCK/testbot.sock"
+
+route deregister testbot >/dev/null 2>&1
+[ -f "$SOCK/testbot.meta" ] && bad "deregister left the meta" || ok "deregister removes socket + meta"
+
+route somethingelse >/dev/null 2>&1 && bad "unknown command succeeded" || ok "rejects an unknown command"
+
+echo "=== authkeys ==="
+o="$(bash "$AUTHKEYS" ssh-ed25519 AAAAKEYBLOB)"
+[ "$o" = "ssh-ed25519 AAAAKEYBLOB" ] && ok "authkeys echoes a valid key (accept-any)" || bad "authkeys output wrong: '$o'"
+o="$(bash "$AUTHKEYS" not-a-keytype AAAAKEYBLOB)"
+[ -z "$o" ] && ok "authkeys emits nothing for an unknown key type (auth fails)" || bad "authkeys accepted a bad type"
+
+echo; echo "=== $P passed, $F failed ==="
+[ "$F" -eq 0 ]

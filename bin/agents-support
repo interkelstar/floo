@@ -1,0 +1,169 @@
+#!/usr/bin/env bash
+# agents-support — operator CLI. Connect to a client box that has an OPEN support session,
+# for a read-only audit or a push upgrade. Vlad runs `connect` (and confirms the pairing
+# code); after that, plain `ssh <botname>` / `rsync <botname>:` work, and the bot can run
+# `agents-support exec <botname> < script` for the read-only audit.
+#
+#   agents-support ca-init                 one-time: create the operator CA + relay key, wire ~/.ssh
+#   agents-support list                    show client boxes with an open session (+ pairing code)
+#   agents-support connect <botname>       verify the code, pin the host key, mint a 60-min cert, open a shell
+#       [--confirm CODE]                   supply the code non-interactively (when already verified)
+#       [--no-shell]                       just establish the session (then use ssh/rsync/exec)
+#   agents-support exec <botname>          run stdin on the box non-interactively (the bot/audit path)
+#   agents-support close <botname>         tear down operator-side routing for a box
+#   agents-support gc                      drop routing for sessions that are no longer live
+set -euo pipefail
+
+ASX_HOME="${ASX_HOME:-$HOME/.config/agents-support}"
+CA="$ASX_HOME/ca/operator_ca"
+RELAY_KEY="$ASX_HOME/relay_id_ed25519"      # operator's CLIENT key, to auth to the gw account
+RELAY_HOSTKEY="$ASX_HOME/relay_hostkey"     # the relay's HOST key (pinned; deployed by install-relay.sh)
+SSH_DROPIN_DIR="$HOME/.ssh/agents-support.d"
+[ -f "$ASX_HOME/relay.env" ] && . "$ASX_HOME/relay.env"
+RELAY_HOST="${ASX_RELAY_HOST:-${RELAY_HOST:-relay.agents-deployed.com}}"
+RELAY_PORT="${ASX_RELAY_PORT:-${RELAY_PORT:-443}}"
+RELAY_USER="${ASX_RELAY_USER:-${RELAY_USER:-gw}}"
+
+if [ -t 1 ]; then B=$'\e[1m'; D=$'\e[2m'; G=$'\e[32m'; Y=$'\e[33m'; R=$'\e[31m'; X=$'\e[0m'; else B="" D="" G="" Y="" R="" X=""; fi
+die() { printf '%serror:%s %s\n' "$R" "$X" "$*" >&2; exit 1; }
+valid_botname() { [[ "$1" =~ ^[a-z0-9][a-z0-9-]{0,62}$ ]] || die "bad botname: $1"; }
+
+ensure_ssh_wiring() {
+  mkdir -p "$SSH_DROPIN_DIR" "$HOME/.ssh"; chmod 700 "$SSH_DROPIN_DIR" "$HOME/.ssh"
+  local inc="Include $SSH_DROPIN_DIR/*.conf"
+  if [ ! -f "$HOME/.ssh/config" ] || ! grep -qF "$inc" "$HOME/.ssh/config"; then
+    { echo "$inc"; echo; cat "$HOME/.ssh/config" 2>/dev/null || true; } > "$HOME/.ssh/config.tmp"
+    mv "$HOME/.ssh/config.tmp" "$HOME/.ssh/config"; chmod 600 "$HOME/.ssh/config"
+  fi
+}
+
+relay_ssh() {
+  ssh -p "$RELAY_PORT" -i "$RELAY_KEY" -o IdentitiesOnly=yes \
+      -o BatchMode=yes -o ConnectTimeout=12 \
+      -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile="$ASX_HOME/relay_known_hosts" \
+      "$RELAY_USER@$RELAY_HOST" "$@"
+}
+
+cmd_ca_init() {
+  mkdir -p "$ASX_HOME/ca" "$ASX_HOME/sessions" "$SSH_DROPIN_DIR"
+  chmod 700 "$ASX_HOME" "$ASX_HOME/ca" "$SSH_DROPIN_DIR"
+  [ -f "$CA" ]        || { ssh-keygen -t ed25519 -f "$CA" -N '' -q -C agents-support-operator-ca; echo "created operator CA"; }
+  [ -f "$RELAY_KEY" ] || { ssh-keygen -t ed25519 -f "$RELAY_KEY" -N '' -q -C agents-support-operator-relay; echo "created relay (client-auth) key"; }
+  # the relay's HOST key: install-relay.sh deploys this same key as the relay's identity, and we
+  # pin its pubkey here so the operator CLI rejects a MITM'd relay (accept-new refuses a mismatch).
+  [ -f "$RELAY_HOSTKEY" ] || { ssh-keygen -t ed25519 -f "$RELAY_HOSTKEY" -N '' -q -C agents-support-relay-host; echo "created relay HOST key"; }
+  chmod 600 "$CA" "$RELAY_KEY" "$RELAY_HOSTKEY"
+  local rt; if [ "$RELAY_PORT" = 22 ]; then rt="$RELAY_HOST"; else rt="[$RELAY_HOST]:$RELAY_PORT"; fi
+  printf '%s %s\n' "$rt" "$(cat "$RELAY_HOSTKEY.pub")" > "$ASX_HOME/relay_known_hosts"
+  ensure_ssh_wiring
+  echo "~/.ssh/config includes $SSH_DROPIN_DIR/*.conf; relay host key pinned for $rt"
+  echo
+  echo "${B}Embed these public keys in the public support.sh:${X}"
+  echo "  ASX_OPERATOR_CA_PUB = $(cat "$CA.pub")"
+  echo "  ASX_RELAY_HOSTKEY   = $(cat "$RELAY_HOSTKEY.pub")"
+}
+
+cmd_list() {
+  local out; out="$(relay_ssh list || true)"
+  [ -n "$out" ] || { echo "no open support sessions."; return 0; }
+  printf '%s%-24s %-8s %-11s %s%s\n' "$B" "BOTNAME" "SOCKET" "CODE" "REGISTERED" "$X"
+  while IFS=$'\t' read -r bn sock code reg; do
+    printf '%-24s %-8s %-11s %s\n' "$bn" "${sock#socket=}" "${code#code=}" "${reg#registered=}"
+  done <<<"$out"
+}
+
+cmd_connect() {
+  local bn="" confirm="" shell=1
+  while [ $# -gt 0 ]; do case "$1" in
+    --confirm) confirm="$2"; shift 2;;
+    --no-shell) shell=0; shift;;
+    -*) die "unknown flag $1";;
+    *) bn="$1"; shift;;
+  esac; done
+  [ -n "$bn" ] || die "usage: agents-support connect <botname>"
+  valid_botname "$bn"
+
+  local meta; meta="$(relay_ssh meta "$bn")" || die "no session for '$bn' on the relay (is it open?)"
+  grep -q '^socket=live' <<<"$meta" || die "'$bn' registered but its socket is not live — ask them to re-run support."
+  local code hostkey loginuser
+  code="$(sed -n 's/^code=//p' <<<"$meta")"
+  loginuser="$(sed -n 's/^loginuser=//p' <<<"$meta")"; loginuser="${loginuser:-$bn}"
+  hostkey="$(sed -n 's/^hostkey=//p' <<<"$meta" | awk '{print $1, $2}')"   # type+blob, drop comment
+  [ -n "$hostkey" ] || die "no host key in the relay record"
+
+  # ── the pairing-code gate: prove this socket is the client's real run, not a squatter ──
+  # We deliberately do NOT display the relay's code: you must obtain it from the CLIENT
+  # out-of-band and type it, so a squatter who registered a different code is caught. Seeing
+  # the relay's value first would let you rubber-stamp it.
+  if [ -n "$confirm" ]; then
+    [ "${confirm^^}" = "$code" ] || die "pairing code does not match this session — DO NOT proceed (wrong box, or someone else answering)."
+    echo "${G}✓ pairing code confirmed${X}"
+  else
+    echo "${D}Ask the person you're helping to read you the pairing code on THEIR screen.${X}"
+    read -r -p "Code from the client's screen (blank to abort): " typed
+    [ -n "$typed" ] || die "aborted."
+    [ "${typed^^}" = "$code" ] || die "that is not this session's code — someone else may be answering, or you're on the wrong box. Aborted."
+    echo "${G}✓ code matches — this is the client's genuine session${X}"
+  fi
+
+  ensure_ssh_wiring
+  local sdir="$ASX_HOME/sessions/$bn"; rm -rf "$sdir"; mkdir -p "$sdir"; chmod 700 "$sdir"
+  printf '%s %s\n' "$bn" "$hostkey" > "$sdir/known_hosts"          # pin the client host key under the alias
+  ssh-keygen -t ed25519 -f "$sdir/opkey" -N '' -q -C "op-$bn"
+  ssh-keygen -s "$CA" -I "op-$bn-$(date -u +%Y%m%dT%H%M%SZ)" -n "$bn" -V +60m "$sdir/opkey.pub" >/dev/null
+  echo "${D}minted a 60-minute certificate (principal=$bn)${X}"
+
+  cat > "$SSH_DROPIN_DIR/$bn.conf" <<CONF
+# agents-support session for $bn — auto-managed, expires with the cert (≤60m). Safe to delete.
+Host $bn
+    HostName $bn
+    HostKeyAlias $bn
+    User $loginuser
+    ProxyCommand ssh -p "$RELAY_PORT" -i "$RELAY_KEY" -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile="$ASX_HOME/relay_known_hosts" "$RELAY_USER@$RELAY_HOST" route "$bn"
+    IdentityFile "$sdir/opkey"
+    CertificateFile "$sdir/opkey-cert.pub"
+    IdentitiesOnly yes
+    UserKnownHostsFile "$sdir/known_hosts"
+    StrictHostKeyChecking yes
+    RequestTTY auto
+CONF
+  chmod 600 "$SSH_DROPIN_DIR/$bn.conf"
+  echo "${G}✓ session ready${X} — plain ${B}ssh $bn${X} / ${B}rsync … $bn:${X} now work (≤60 min)."
+  if [ "$shell" = 1 ]; then echo "${D}opening a shell… (they can watch via 'support.sh --watch')${X}"; exec ssh "$bn"; fi
+}
+
+cmd_exec() {
+  local bn="${1:-}"; [ -n "$bn" ] || die "usage: agents-support exec <botname> < script"
+  valid_botname "$bn"
+  [ -f "$SSH_DROPIN_DIR/$bn.conf" ] || die "no active session for '$bn' — run 'agents-support connect $bn' first."
+  # the bot/audit path: feed a script over a non-interactive shell. Recorded on the client side.
+  ssh -o BatchMode=yes "$bn" 'bash -s'
+}
+
+cmd_close() {
+  local bn="${1:-}"; [ -n "$bn" ] || die "usage: agents-support close <botname>"
+  valid_botname "$bn"
+  rm -f "$SSH_DROPIN_DIR/$bn.conf"; rm -rf "$ASX_HOME/sessions/$bn"
+  echo "closed operator-side routing for '$bn' (the client's Ctrl-C is the real revoke)."
+}
+
+cmd_gc() {
+  local live; live="$(relay_ssh list 2>/dev/null | cut -f1 || true)"
+  shopt -s nullglob
+  for conf in "$SSH_DROPIN_DIR"/*.conf; do
+    local bn; bn="$(basename "${conf%.conf}")"
+    if ! grep -qx "$bn" <<<"$live"; then rm -f "$conf"; rm -rf "$ASX_HOME/sessions/$bn"; echo "gc: dropped stale '$bn'"; fi
+  done
+  echo "gc done."
+}
+
+case "${1:-}" in
+  ca-init) shift; cmd_ca_init "$@";;
+  list)    shift; cmd_list "$@";;
+  connect) shift; cmd_connect "$@";;
+  exec)    shift; cmd_exec "$@";;
+  close)   shift; cmd_close "$@";;
+  gc)      shift; cmd_gc "$@";;
+  -h|--help|"") sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//';;
+  *) die "unknown command: $1";;
+esac
