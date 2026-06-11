@@ -22,6 +22,41 @@ SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 [ "$(id -u)" = 0 ] || { echo "run as root (sudo)"; exit 1; }
 
+# ── distro abstraction (Fedora/RHEL · Debian/Ubuntu · Arch · Alpine) ──────────────────────
+pkg_install() {
+  if   command -v dnf     >/dev/null; then dnf install -y "$@"
+  elif command -v apt-get >/dev/null; then apt-get update -qq && apt-get install -y "$@"
+  elif command -v pacman  >/dev/null; then pacman -Sy --noconfirm "$@"
+  elif command -v apk     >/dev/null; then apk add "$@"
+  else return 1; fi
+}
+SSHD_BIN="$(command -v sshd || echo /usr/sbin/sshd)"
+open_port() {
+  if   command -v firewall-cmd >/dev/null; then firewall-cmd --permanent --add-port="$1/tcp" >/dev/null 2>&1 && firewall-cmd --reload >/dev/null 2>&1
+  elif command -v ufw          >/dev/null; then ufw allow "$1/tcp" >/dev/null 2>&1
+  elif command -v nft          >/dev/null; then nft add rule inet filter input tcp dport "$1" accept 2>/dev/null || true
+  fi
+}
+close_port() {
+  if   command -v firewall-cmd >/dev/null; then firewall-cmd --permanent --remove-port="$1/tcp" 2>/dev/null || true; firewall-cmd --reload >/dev/null 2>&1 || true
+  elif command -v ufw          >/dev/null; then ufw delete allow "$1/tcp" >/dev/null 2>&1 || true
+  fi
+}
+ensure_gw_user() {
+  id gw >/dev/null 2>&1 && return 0
+  if command -v useradd >/dev/null; then useradd --system --create-home --home-dir /var/lib/floo --shell /bin/bash gw
+  else adduser -S -D -H -h /var/lib/floo -s /bin/sh gw 2>/dev/null || adduser --system --home /var/lib/floo gw 2>/dev/null; mkdir -p /var/lib/floo; fi
+}
+ensure_nc() {
+  command -v nc >/dev/null && return 0
+  if   command -v dnf     >/dev/null; then pkg_install nmap-ncat
+  elif command -v apt-get >/dev/null; then pkg_install netcat-openbsd
+  elif command -v pacman  >/dev/null; then pkg_install openbsd-netcat
+  elif command -v apk     >/dev/null; then pkg_install netcat-openbsd
+  fi
+  ensure_nc
+}
+
 uninstall() {
   # complete removal — leave ZERO leftovers, so a box can be wiped/moved cleanly. The only thing
   # deliberately NOT touched is ~/.config/floo (the operator's keys = durable access).
@@ -30,10 +65,7 @@ uninstall() {
   rm -f /usr/local/bin/floo-route /usr/local/bin/floo-authkeys
   rm -rf "$ETC" "$SOCKDIR"
   systemctl daemon-reload
-  if command -v firewall-cmd >/dev/null; then
-    for p in "${PORT}" 443; do firewall-cmd --permanent --remove-port="${p}/tcp" 2>/dev/null || true; done
-    firewall-cmd --reload 2>/dev/null || true
-  fi
+  for p in "${PORT}" 443; do close_port "$p"; done
   id gw >/dev/null 2>&1 && { userdel -r gw 2>/dev/null || userdel gw 2>/dev/null || true; }
   if command -v semanage >/dev/null 2>&1; then
     for p in "${PORT}" 443; do semanage port -d -t ssh_port_t -p tcp "$p" 2>/dev/null || true; done
@@ -45,7 +77,7 @@ uninstall() {
 [ "${1:-}" = "--uninstall" ] && uninstall
 
 echo "==> gw service account"
-id gw >/dev/null 2>&1 || useradd --system --create-home --home-dir /var/lib/floo --shell /bin/bash gw
+ensure_gw_user
 # useradd locks the password (!), and sshd refuses a login to a locked account ("account is
 # locked") even for publickey. '*' = not locked, but no usable password (password login stays
 # impossible, and PasswordAuthentication no blocks it anyway). Idempotent.
@@ -115,7 +147,7 @@ Match User gw
     PermitTTY no
     ForceCommand /usr/local/bin/floo-route
 CFG
-/usr/sbin/sshd -t -f "$ETC/relay_sshd_config" && echo "   sshd config OK"
+"$SSHD_BIN" -t -f "$ETC/relay_sshd_config" && echo "   sshd config OK"
 
 # SELinux: under systemd the relay runs in the confined sshd_t domain, which may bind only the
 # ssh port (22). Our port (443 = http_port_t by default) is refused with EACCES until we label it
@@ -138,7 +170,7 @@ Wants=network-online.target
 
 [Service]
 ExecStartPre=/usr/bin/systemd-tmpfiles --create /etc/tmpfiles.d/floo.conf
-ExecStart=/usr/sbin/sshd -D -e -f $ETC/relay_sshd_config
+ExecStart=$SSHD_BIN -D -e -f $ETC/relay_sshd_config
 Restart=on-failure
 RestartSec=3
 # the dispatcher writes session metas as gw; sshd needs root to bind $PORT + privsep
@@ -148,10 +180,8 @@ UNIT
 systemctl daemon-reload
 systemctl enable --now floo-relay.service
 
-if command -v firewall-cmd >/dev/null; then
-  echo "==> opening $PORT/tcp"
-  firewall-cmd --permanent --add-port="${PORT}/tcp" >/dev/null && firewall-cmd --reload >/dev/null
-fi
+echo "==> opening $PORT/tcp"
+open_port "$PORT"
 
 echo
 echo "relay up on :$PORT — host key fingerprint (clients pin this via accept-new on first dial):"
