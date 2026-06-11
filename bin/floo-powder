@@ -15,6 +15,7 @@
 set -euo pipefail
 
 FLOO_HOME="${FLOO_HOME:-$HOME/.config/floo}"
+FLOO_VERSION="0.1.0"
 CA="$FLOO_HOME/ca/operator_ca"
 RELAY_KEY="$FLOO_HOME/relay_id_ed25519"      # operator's CLIENT key, to auth to the gw account
 RELAY_HOSTKEY="$FLOO_HOME/relay_hostkey"     # the relay's HOST key (pinned; deployed by install-relay.sh)
@@ -157,13 +158,35 @@ cmd_gc() {
   echo "gc done."
 }
 
+cmd_init() {
+  cmd_ca_init >/dev/null
+  local host="${FLOO_RELAY_PUBLIC_HOST:-$(curl -fsS --max-time 5 ifconfig.me 2>/dev/null)}"
+  local port="${FLOO_RELAY_PORT:-443}"
+  [ -n "$host" ] || die "could not determine the relay's public host — set FLOO_RELAY_PUBLIC_HOST=<host>"
+  local ca hk; ca="$(cat "$CA.pub")"; hk="$(cat "$RELAY_HOSTKEY.pub")"
+  local commit="${FLOO_PIN_COMMIT:-main}"
+  if [ -z "${FLOO_INIT_NO_RELAY:-}" ]; then
+    echo "standing up the relay on this box (sudo)…"
+    sudo "$(dirname "$0")/../relay/install-relay.sh" || die "relay install failed"
+  fi
+  echo
+  echo "${B}── client one-liner (share this) ──${X}"
+  echo "curl -fsSL https://raw.githubusercontent.com/interkelstar/floo/$commit/floo | bash -s -- --relay $host:$port --operator-ca '$ca' --relay-hostkey '$hk'"
+  echo
+  echo "${B}── or an importable config blob (clients run: floo config import) ──${X}"
+  printf '{"name":"%s","relay_host":"%s","relay_port":"%s","operator_ca":"%s","relay_hostkey":"%s"}\n' \
+    "${FLOO_OPERATOR_NAME:-$(hostname -s)}" "$host" "$port" "$ca" "$hk"
+}
+
 case "${1:-}" in
+  init)    shift; cmd_init "$@";;
   ca-init) shift; cmd_ca_init "$@";;
   list)    shift; cmd_list "$@";;
   connect) shift; cmd_connect "$@";;
   exec)    shift; cmd_exec "$@";;
   close)   shift; cmd_close "$@";;
   gc)      shift; cmd_gc "$@";;
+  --version) echo "floo-powder $FLOO_VERSION";;
   -h|--help|"") sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//';;
   *) die "unknown command: $1";;
 esac
