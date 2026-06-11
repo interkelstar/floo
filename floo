@@ -58,9 +58,11 @@ info() { printf '%s•%s %s\n' "$D" "$X" "$*"; }
 ok()   { printf '%s✓%s %s\n' "$G" "$X" "$*"; }
 warn() { printf '%s⚠%s %s\n' "$Y" "$X" "$*"; }
 
-# ─── Resolve the botname (our natural key: the box's unique name). ────────────────────────
-# Order: explicit override → deployment.json field → the Cockpit URL prefix → hostname
-# label → the Unix username (provisioning sets user = botname). All cheap, all local.
+codehash() { printf '%s' "$1" | sha256sum | cut -c1-64; }   # pairing code never leaves the box in clear
+
+# ─── Resolve this box's name (our natural key: the box's unique label). ───────────────────
+# Order: --name / FLOO_NAME -> FLOO_IDENTITY_HOOK (a script printing the name; how a deployment
+# plugs in its own naming) -> hostname -s -> the Unix username. All cheap, all local.
 resolve_name() {
   [ -n "${FLOO_NAME:-}" ] && { printf '%s' "$FLOO_NAME"; return; }
   if [ -n "${FLOO_IDENTITY_HOOK:-}" ] && [ -x "$FLOO_IDENTITY_HOOK" ]; then
@@ -116,8 +118,11 @@ build_endpoint() {
   if [ -n "${FLOO_RELAY_HOSTKEY:-}" ]; then
     local rt; if [ "$FLOO_RELAY_PORT" = 22 ]; then rt="$FLOO_RELAY_HOST"; else rt="[$FLOO_RELAY_HOST]:$FLOO_RELAY_PORT"; fi
     printf '%s %s\n' "$rt" "$FLOO_RELAY_HOSTKEY" > "$WORKDIR/relay_known_hosts"
+  elif [ -n "${FLOO_ALLOW_TOFU:-}" ]; then
+    warn "relay host key not pinned; FLOO_ALLOW_TOFU set -> trust-on-first-use (MITM-able on the first dial)."
   else
-    warn "relay host key is not pinned — falling back to trust-on-first-use for the relay."
+    warn "relay host key not pinned. Pass --relay-hostkey, import an operator config, or set FLOO_ALLOW_TOFU=1 to accept trust-on-first-use. Refusing."
+    exit 1
   fi
   printf '%s\n' "$NAME" > "$WORKDIR/principals"      # the cert principal we will accept
   ssh-keygen -t ed25519 -f "$WORKDIR/hostkey" -N '' -q -C "floo-$NAME"
@@ -274,7 +279,7 @@ register_and_tunnel() {
   local hostpub; hostpub="$(cat "$WORKDIR/hostkey.pub")"
 
   info "registering the session with the relay…"
-  if ! relay_ssh register "$NAME" "$PAIRCODE" "$(id -un)" "$hostpub"; then
+  if ! relay_ssh register "$NAME" "$(codehash "$PAIRCODE")" "$(id -un)" "$hostpub"; then
     warn "could not reach the relay at $FLOO_RELAY_HOST:$FLOO_RELAY_PORT — is the network up?"
     return 1
   fi
@@ -520,12 +525,19 @@ pairing code to read back; the session is recorded to your disk; Ctrl-C (or clos
 window) revokes it. Nothing is installed, nothing runs as root, nothing survives a reboot.
 
 Usage:
-  floo              open a support session (default)
-  floo --watch      attach a read-only live view to a session already running
-  floo --status     print whether a session is currently open, then exit
+  floo                      open a support session using a saved operator (see config below)
+  floo --relay H[:P] --operator-ca KEY [--relay-hostkey KEY] [--name N]
+                            open a session with the operator passed inline (ad-hoc)
+  floo --operator NAME      pick which saved operator to use
+  floo --watch              attach a read-only live view to a session already running
+  floo --status             print whether a session is currently open, then exit
+  floo install              copy floo into ~/.local/bin (so you needn't curl it each time)
+  floo config import [F]    save an operator config blob (file or stdin)
+  floo config add NAME --relay H[:P] --operator-ca KEY [--relay-hostkey KEY]
+  floo config list | remove NAME
   floo --help | --version
 
-Env overrides (testing): FLOO_NAME, FLOO_RELAY_HOST, FLOO_RELAY_PORT, FLOO_RELAY_USER.
+Identity: --name / FLOO_NAME, else FLOO_IDENTITY_HOOK, else hostname, else \$USER.
 EOF
 }
 
@@ -534,6 +546,7 @@ FLOO_CFG="${FLOO_CONFIG_DIR:-$HOME/.config/floo}/operators"
 cfg_get() { sed -n "s/.*\"$1\":\"\\([^\"]*\\)\".*/\\1/p" "$2"; }
 cmd_config() {
   local sub="${1:-list}"; shift 2>/dev/null || true
+  valid_cfg_name() { case "$1" in ""|*/*|*..*) return 1;; *) return 0;; esac; }
   case "$sub" in
     add)
       local name="${1:-}"; shift 2>/dev/null || true; local relay="" ca="" hk=""
@@ -541,15 +554,17 @@ cmd_config() {
         --relay) relay="$2"; shift 2;; --operator-ca) ca="$2"; shift 2;; --relay-hostkey) hk="$2"; shift 2;; *) shift;; esac; done
       [ -n "$name" ] && [ -n "$relay" ] && [ -n "$ca" ] || { echo "usage: floo config add NAME --relay H[:P] --operator-ca KEY [--relay-hostkey KEY]" >&2; return 1; }
       local host="${relay%%:*}" port=443; case "$relay" in *:*) port="${relay##*:}";; esac
+      valid_cfg_name "$name" || { echo "bad operator name (no / or ..)" >&2; return 1; }
       umask 077; mkdir -p "$FLOO_CFG"
       printf '{"name":"%s","relay_host":"%s","relay_port":"%s","operator_ca":"%s","relay_hostkey":"%s"}\n' "$name" "$host" "$port" "$ca" "$hk" > "$FLOO_CFG/$name.json"
       echo "saved operator '$name'";;
     import)
       local blob; blob="$(cat "${1:--}")"; local name; name="$(printf '%s' "$blob" | sed -n 's/.*"name":"\([^"]*\)".*/\1/p')"
       [ -n "$name" ] || { echo "import: blob has no \"name\"" >&2; return 1; }
+      valid_cfg_name "$name" || { echo "import: unsafe operator name in blob" >&2; return 1; }
       umask 077; mkdir -p "$FLOO_CFG"; printf '%s\n' "$blob" > "$FLOO_CFG/$name.json"; echo "imported operator '$name'";;
     list) ls "$FLOO_CFG" 2>/dev/null | sed 's/\.json$//' || true;;
-    remove) [ -n "${1:-}" ] && rm -f "$FLOO_CFG/$1.json" && echo "removed '$1'";;
+    remove) valid_cfg_name "${1:-}" || { echo "bad operator name" >&2; return 1; }; rm -f "$FLOO_CFG/$1.json" && echo "removed '$1'";;
     *) echo "floo config {add|import|list|remove}" >&2; return 1;;
   esac
 }

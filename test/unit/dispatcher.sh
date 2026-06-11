@@ -16,15 +16,19 @@ route(){ SSH_ORIGINAL_COMMAND="$*" SSH_CONNECTION="1.2.3.4 5 6 7" bash "$ROUTE";
 
 echo "=== dispatcher ==="
 HK="ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAtestkeyblob comment@host"
+CODE="AB12-CD34"; CH="$(printf '%s' "$CODE" | sha256sum | cut -c1-64)"
 
-route register testbot AB12-CD34 kelstar $HK >/dev/null 2>&1 \
+route register testbot "$CH" kelstar $HK >/dev/null 2>&1 \
   && [ -f "$SOCK/testbot.meta" ] && ok "register writes a meta file" || bad "register failed"
-grep -q '^code=AB12-CD34' "$SOCK/testbot.meta" && ok "meta records the pairing code" || bad "code not in meta"
+[ "$(route verify testbot "$CH" 2>/dev/null)" = "match=yes" ] && ok "verify accepts the correct code hash" || bad "verify rejected the right hash"
+[ "$(route verify testbot "$(printf '%s' WRONG | sha256sum | cut -c1-64)" 2>/dev/null)" = "match=no" ] && ok "verify rejects a wrong code hash" || bad "verify accepted a wrong hash"
+route meta testbot 2>/dev/null | grep -q '^code=' && bad "meta leaks the code hash" || ok "meta never exposes the code"
+route list 2>/dev/null | grep -q 'code=' && bad "list leaks the code" || ok "list never exposes the code"
 grep -q '^loginuser=kelstar' "$SOCK/testbot.meta" && ok "meta records the login user" || bad "loginuser not in meta"
 
-route register 'bad/name' AB12-CD34 kelstar $HK >/dev/null 2>&1 && bad "accepted path-traversal botname" || ok "rejects an invalid botname"
-route register testbot NOTACODE kelstar $HK >/dev/null 2>&1 && bad "accepted a malformed code" || ok "rejects a malformed pairing code"
-route register testbot AB12-CD34 'root;rm' $HK >/dev/null 2>&1 && bad "accepted a bad login user" || ok "rejects an invalid login user"
+route register 'bad/name' "$CH" kelstar $HK >/dev/null 2>&1 && bad "accepted path-traversal botname" || ok "rejects an invalid botname"
+route register testbot NOTACODE kelstar $HK >/dev/null 2>&1 && bad "accepted a malformed code" || ok "rejects a malformed code hash"
+route register testbot "$CH" 'root;rm' $HK >/dev/null 2>&1 && bad "accepted a bad login user" || ok "rejects an invalid login user"
 
 out="$(route meta testbot 2>/dev/null)"
 grep -q 'socket=absent' <<<"$out" && ok "meta reports socket=absent when no tunnel is up" || bad "meta should report absent"

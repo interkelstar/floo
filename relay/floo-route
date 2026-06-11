@@ -7,7 +7,8 @@
 # operator and a client's already-encrypted SSH endpoint — it never sees session plaintext.
 #
 # Subcommands (taken from $SSH_ORIGINAL_COMMAND):
-#   register <botname> <CODE> <loginuser> <hostkey...>  client publishes pairing code + host key
+#   register <botname> <CODEHASH> <loginuser> <hostkey...> client publishes sha256(code) + host key
+#   verify <botname> <CODEHASH>                          operator checks the code without it ever leaking
 #   meta <botname>                                       operator reads it back to verify the code
 #   route <botname>                                      operator pivot: connect to the client socket
 #   deregister <botname>                                 client teardown removes its socket + meta
@@ -45,7 +46,7 @@ case "$cmd" in
   register)
     valid_botname "$bn" || deny "bad botname"
     code="${A[2]:-}"
-    [[ "$code" =~ ^[A-F0-9]{4}-[A-F0-9]{4}$ ]] || deny "bad pairing code"
+    [[ "$code" =~ ^[a-f0-9]{64}$ ]] || deny "bad pairing code hash"
     loginuser="${A[3]:-}"
     [[ "$loginuser" =~ ^[a-z_][a-z0-9_-]{0,31}$ ]] || deny "bad login user"
     hostpub="${A[*]:4}"
@@ -73,7 +74,14 @@ case "$cmd" in
     valid_botname "$bn" || deny "bad botname"
     [ -f "$SOCKDIR/$bn.meta" ] || deny "no such session"
     if socket_live "$SOCKDIR/$bn.sock"; then echo "socket=live"; else echo "socket=absent"; fi
-    cat "$SOCKDIR/$bn.meta"
+    grep -v '^code=' "$SOCKDIR/$bn.meta"   # never expose the code hash; verify it relay-side
+    ;;
+
+  verify)
+    valid_botname "$bn" || deny "bad botname"
+    [ -f "$SOCKDIR/$bn.meta" ] || deny "no such session"
+    want="$(sed -n 's/^code=//p' "$SOCKDIR/$bn.meta")"; got="${A[2]:-}"
+    if [ -n "$got" ] && [ "$got" = "$want" ]; then echo "match=yes"; else echo "match=no"; fi
     ;;
 
   route)
@@ -95,8 +103,8 @@ case "$cmd" in
     for m in "$SOCKDIR"/*.meta; do
       b="$(basename "${m%.meta}")"
       if socket_live "$SOCKDIR/$b.sock"; then live="live"; else live="absent"; gc_dead "$b"; [ -f "$m" ] || continue; fi
-      code="$(sed -n 's/^code=//p' "$m")"; reg="$(sed -n 's/^registered=//p' "$m")"
-      printf '%s\tsocket=%s\tcode=%s\tregistered=%s\n' "$b" "$live" "$code" "$reg"
+      reg="$(sed -n 's/^registered=//p' "$m")"
+      printf '%s\tsocket=%s\tregistered=%s\n' "$b" "$live" "$reg"
     done
     ;;
 

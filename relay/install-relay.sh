@@ -54,10 +54,11 @@ ensure_nc() {
   elif command -v pacman  >/dev/null; then pkg_install openbsd-netcat
   elif command -v apk     >/dev/null; then pkg_install netcat-openbsd
   fi
-  ensure_nc
+  command -v nc >/dev/null || { echo "FATAL: 'nc' (netcat) not found and could not be installed — install it and re-run; the relay needs it."; exit 1; }
 }
 
 uninstall() {
+  local up; up="$(cat "$ETC/port" 2>/dev/null || echo "$PORT")"
   # complete removal — leave ZERO leftovers, so a box can be wiped/moved cleanly. The only thing
   # deliberately NOT touched is ~/.config/floo (the operator's keys = durable access).
   systemctl disable --now floo-relay.service 2>/dev/null || true
@@ -65,11 +66,11 @@ uninstall() {
   rm -f /usr/local/bin/floo-route /usr/local/bin/floo-authkeys
   rm -rf "$ETC" "$SOCKDIR"
   systemctl daemon-reload
-  for p in "${PORT}" 443; do close_port "$p"; done
+  close_port "$up"
   rm -f /etc/fail2ban/jail.d/floo-relay.local 2>/dev/null && command -v fail2ban-client >/dev/null 2>&1 && systemctl reload fail2ban 2>/dev/null || true
   id gw >/dev/null 2>&1 && { userdel -r gw 2>/dev/null || userdel gw 2>/dev/null || true; }
   if command -v semanage >/dev/null 2>&1; then
-    for p in "${PORT}" 443; do semanage port -d -t ssh_port_t -p tcp "$p" 2>/dev/null || true; done
+    semanage port -d -t ssh_port_t -p tcp "$up" 2>/dev/null || true
   fi
   echo "relay fully uninstalled — service, helpers, $ETC, $SOCKDIR, the gw user, SELinux label, and the firewall"
   echo "opening are all removed. Your operator keys in ~/.config/floo are untouched."
@@ -87,16 +88,16 @@ usermod -p '*' gw
 echo "==> dispatcher + authkeys helper"
 install -m 0755 "$SELF_DIR/floo-route"    /usr/local/bin/floo-route
 install -m 0755 "$SELF_DIR/floo-authkeys" /usr/local/bin/floo-authkeys
-# nc is REQUIRED: the route pivot execs it, and socket liveness is probed with it. A missing nc
-# would break routing, so fail loudly at install rather than silently at session time.
-command -v nc >/dev/null || { echo "FATAL: 'nc' (nmap-ncat/netcat) not found — install it and re-run; the relay needs it."; exit 1; }
+# nc is REQUIRED: the route pivot execs it, and socket liveness is probed with it. Install it
+# per-distro if absent; ensure_nc fails loudly if it still can't be provided.
+ensure_nc
 
 echo "==> socket dir ($SOCKDIR) via tmpfiles (recreated on every boot — nothing persists across reboot)"
 echo "d $SOCKDIR 0755 gw gw -" > /etc/tmpfiles.d/floo.conf
 systemd-tmpfiles --create /etc/tmpfiles.d/floo.conf
 
 echo "==> relay sshd config + dedicated host key (isolated from the box's primary sshd)"
-mkdir -p "$ETC"; chmod 755 "$ETC"
+mkdir -p "$ETC"; chmod 755 "$ETC"; echo "$PORT" > "$ETC/port"
 # Use the operator's pre-generated relay host key (its PUBLIC half is pinned in floo as
 # FLOO_RELAY_HOSTKEY) so the deployed relay's identity matches what every client verifies — this
 # closes a relay-MITM. Resolve it from the invoking user's config; if absent, generate a fresh one

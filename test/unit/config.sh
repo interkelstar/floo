@@ -10,5 +10,9 @@ ok(){ echo "  PASS $1"; P=$((P+1)); }; bad(){ echo "  FAIL $1"; F=$((F+1)); }
 echo '{"name":"beta","relay_host":"relay.beta.com","relay_port":"443","operator_ca":"ssh-ed25519 AAAACB beta","relay_hostkey":""}' | "$FLOO" config import - >/dev/null 2>&1
 [ -f "$H/.config/floo/operators/beta.json" ] && ok "config import saves by name" || bad "import"
 [ "$("$FLOO" --operator beta --show-operator 2>/dev/null)" = "relay=relay.beta.com:443" ] && ok "--operator selects among several" || bad "--operator got: $("$FLOO" --operator beta --show-operator 2>/dev/null)"
+"$FLOO" config add '../../evil' --relay r:443 --operator-ca 'ssh-ed25519 X e' >/dev/null 2>&1
+[ -f "$H/.config/evil.json" ] || [ -f "$H/evil.json" ] && bad "config add allowed path traversal" || ok "config add rejects path traversal (../..)"
+echo '{"name":"../../../etc/x","relay_host":"r","relay_port":"443","operator_ca":"ssh-ed25519 X e","relay_hostkey":""}' | "$FLOO" config import - >/dev/null 2>&1
+[ -f "$H/.config/floo/operators/../../../etc/x.json" ] 2>/dev/null; ls "$H/etc/x.json" >/dev/null 2>&1 && bad "import allowed traversal" || ok "config import rejects traversal in blob name"
 "$FLOO" config remove acme >/dev/null 2>&1; [ -f "$H/.config/floo/operators/acme.json" ] && bad "remove" || ok "config remove deletes"
 rm -rf "$H"; echo "$P passed, $F failed"; [ "$F" -eq 0 ]

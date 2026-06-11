@@ -28,6 +28,7 @@ RELAY_USER="${FLOO_RELAY_USER:-${RELAY_USER:-gw}}"
 if [ -t 1 ]; then B=$'\e[1m'; D=$'\e[2m'; G=$'\e[32m'; Y=$'\e[33m'; R=$'\e[31m'; X=$'\e[0m'; else B="" D="" G="" Y="" R="" X=""; fi
 die() { printf '%serror:%s %s\n' "$R" "$X" "$*" >&2; exit 1; }
 valid_botname() { [[ "$1" =~ ^[a-z0-9][a-z0-9-]{0,62}$ ]] || die "bad botname: $1"; }
+codehash() { printf '%s' "$1" | sha256sum | cut -c1-64; }
 
 ensure_ssh_wiring() {
   mkdir -p "$SSH_DROPIN_DIR" "$HOME/.ssh"; chmod 700 "$SSH_DROPIN_DIR" "$HOME/.ssh"
@@ -67,9 +68,9 @@ cmd_ca_init() {
 cmd_list() {
   local out; out="$(relay_ssh list || true)"
   [ -n "$out" ] || { echo "no open support sessions."; return 0; }
-  printf '%s%-24s %-8s %-11s %s%s\n' "$B" "BOTNAME" "SOCKET" "CODE" "REGISTERED" "$X"
-  while IFS=$'\t' read -r bn sock code reg; do
-    printf '%-24s %-8s %-11s %s\n' "$bn" "${sock#socket=}" "${code#code=}" "${reg#registered=}"
+  printf '%s%-24s %-8s %s%s\n' "$B" "NAME" "SOCKET" "REGISTERED" "$X"
+  while IFS=$'\t' read -r bn sock reg; do
+    printf '%-24s %-8s %s\n' "$bn" "${sock#socket=}" "${reg#registered=}"
   done <<<"$out"
 }
 
@@ -86,8 +87,7 @@ cmd_connect() {
 
   local meta; meta="$(relay_ssh meta "$bn")" || die "no session for '$bn' on the relay (is it open?)"
   grep -q '^socket=live' <<<"$meta" || die "'$bn' registered but its socket is not live — ask them to re-run support."
-  local code hostkey loginuser
-  code="$(sed -n 's/^code=//p' <<<"$meta")"
+  local hostkey loginuser
   loginuser="$(sed -n 's/^loginuser=//p' <<<"$meta")"; loginuser="${loginuser:-$bn}"
   hostkey="$(sed -n 's/^hostkey=//p' <<<"$meta" | awk '{print $1, $2}')"   # type+blob, drop comment
   [ -n "$hostkey" ] || die "no host key in the relay record"
@@ -96,16 +96,19 @@ cmd_connect() {
   # We deliberately do NOT display the relay's code: you must obtain it from the CLIENT
   # out-of-band and type it, so a squatter who registered a different code is caught. Seeing
   # the relay's value first would let you rubber-stamp it.
-  if [ -n "$confirm" ]; then
-    [ "${confirm^^}" = "$code" ] || die "pairing code does not match this session — DO NOT proceed (wrong box, or someone else answering)."
-    echo "${G}✓ pairing code confirmed${X}"
+  # The code never leaves the client in clear: it registered sha256(code); we hash what you type
+  # and the relay compares hashes (so a leaked meta/list can't expose it). Never displayed — you
+  # must get it from the CLIENT out-of-band, so a squatter with a different code is caught.
+  local typed
+  if [ -n "$confirm" ]; then typed="$confirm"
   else
     echo "${D}Ask the person you're helping to read you the pairing code on THEIR screen.${X}"
     read -r -p "Code from the client's screen (blank to abort): " typed
     [ -n "$typed" ] || die "aborted."
-    [ "${typed^^}" = "$code" ] || die "that is not this session's code — someone else may be answering, or you're on the wrong box. Aborted."
-    echo "${G}✓ code matches — this is the client's genuine session${X}"
   fi
+  [ "$(relay_ssh verify "$bn" "$(codehash "${typed^^}")")" = "match=yes" ] \
+    || die "pairing code does not match this session — DO NOT proceed (wrong box, or someone else answering)."
+  echo "${G}✓ code matches — this is the client's genuine session${X}"
 
   ensure_ssh_wiring
   local sdir="$FLOO_HOME/sessions/$bn"; rm -rf "$sdir"; mkdir -p "$sdir"; chmod 700 "$sdir"
@@ -163,12 +166,14 @@ cmd_init() {
   local host="${FLOO_RELAY_PUBLIC_HOST:-$(curl -fsS --max-time 5 ifconfig.me 2>/dev/null)}"
   local port="${FLOO_RELAY_PORT:-443}"
   [ -n "$host" ] || die "could not determine the relay's public host — set FLOO_RELAY_PUBLIC_HOST=<host>"
-  local ca hk; ca="$(cat "$CA.pub")"; hk="$(cat "$RELAY_HOSTKEY.pub")"
-  local commit="${FLOO_PIN_COMMIT:-main}"
   if [ -z "${FLOO_INIT_NO_RELAY:-}" ]; then
     echo "standing up the relay on this box (sudo)…"
     sudo "$(dirname "$0")/../relay/install-relay.sh" || die "relay install failed"
   fi
+  local ca hk; ca="$(cat "$CA.pub")"
+  # prefer the ACTUAL deployed relay host key (what clients will pin); fall back to the operator's
+  hk="$(cat /etc/floo/relay_hostkey.pub 2>/dev/null || cat "$RELAY_HOSTKEY.pub")"
+  local commit="${FLOO_PIN_COMMIT:-main}"
   echo
   echo "${B}── client one-liner (share this) ──${X}"
   echo "curl -fsSL https://raw.githubusercontent.com/interkelstar/floo/$commit/floo | bash -s -- --relay $host:$port --operator-ca '$ca' --relay-hostkey '$hk'"
