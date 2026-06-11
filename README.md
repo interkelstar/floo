@@ -63,7 +63,7 @@ git clone https://github.com/interkelstar/floo && cd floo
 bin/floo-powder install                  # symlink floo-powder (+ floo) into ~/.local/bin — then drop the bin/ prefix
 floo-powder init                         # turnkey: keys + relay + prints the client one-liner & config blob
 
-floo-powder list                     # clients with an open session (+ pairing code)
+floo-powder list                     # clients with an open session
 floo-powder connect <name>           # type the code the CLIENT reads you, get a shell
 floo-powder exec <name> < audit.sh   # run a script non-interactively (recorded on the client)
 floo-powder close <name>             # drop operator-side routing

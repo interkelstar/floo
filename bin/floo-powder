@@ -6,7 +6,7 @@
 # `floo-powder exec <botname> < script` for the read-only audit.
 #
 #   floo-powder ca-init                 one-time: create the operator CA + relay key, wire ~/.ssh
-#   floo-powder list                    show client boxes with an open session (+ pairing code)
+#   floo-powder list                    show client boxes with an open session
 #   floo-powder connect <botname>       verify the code, pin the host key, mint a 60-min cert, open a shell
 #       [--confirm CODE]                   supply the code non-interactively (when already verified)
 #       [--no-shell]                       just establish the session (then use ssh/rsync/exec)
