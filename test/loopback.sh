@@ -17,10 +17,6 @@ note() { printf '\e[2m  · %s\e[0m\n' "$1"; }
 
 CA_PUB="$HOME/.config/floo/ca/operator_ca.pub"
 [ -f "$CA_PUB" ] || { echo "need operator CA at $CA_PUB (run: bin/floo-powder ca-init)"; exit 1; }
-# confirm the CA the operator will sign with matches the one embedded in floo
-EMBED="$(grep -oE 'AAAA[A-Za-z0-9+/=]+' "$REPO/floo" | head -1)"
-ACTUAL="$(awk '{print $2}' "$CA_PUB")"
-[ "$EMBED" = "$ACTUAL" ] || { echo "embedded CA pubkey in floo != operator CA — regenerate"; exit 1; }
 
 # ssh resolves the operator's config via getpwuid() (the real home), not $HOME — so the
 # operator CLI must run with the real home (which is the genuine operator setup anyway).
@@ -102,6 +98,7 @@ PTYRUN_LOG="$WORK/client.log" PTYRUN_PIDFILE="$WORK/client.pid" \
     FLOO_NAME=testbot FLOO_RELAY_HOST=127.0.0.1 FLOO_RELAY_PORT="$PORT" \
     FLOO_RELAY_USER="$ME" FLOO_RELAY_SOCK_DIR="$SOCK" \
     FLOO_RELAY_HOSTKEY="$(cat "$RELAY/hostkey.pub")" \
+    FLOO_OPERATOR_CA="$(cat "$CA_PUB")" \
     bash "$REPO/floo" &
 PTYRUN_PID=$!
 for i in $(seq 1 30); do [ -s "$WORK/client.pid" ] && break; sleep 0.1; done

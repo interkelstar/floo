@@ -37,15 +37,15 @@ FLOO_VERSION="0.1.0"
 # know precisely who you let in. Secrecy of this line buys nothing; its INTEGRITY is what
 # matters — if you fetched this script pinned to a commit hash over HTTPS, this line is the
 # one the operator published.
-FLOO_OPERATOR_CA='ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAID2/+aVkVLnEOP1rUsKso9o25pKNdjIrxnPNqwkJv6x4 floo-powder-operator-ca'
+FLOO_OPERATOR_CA="${FLOO_OPERATOR_CA:-}"
 
 # The relay's host PUBLIC key — PINNED so a hijacked/MITM'd relay.agents-deployed.com is rejected
 # rather than trusted on first contact. Without this pin, a network attacker who answers as the
 # relay could feed your registration to themselves. Public by design (host keys are public).
-FLOO_RELAY_HOSTKEY="${FLOO_RELAY_HOSTKEY:-ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIMHZLwc4mkm8d+vT8+dERAIj2z4tiQo/8hkPPqwltF+F floo-powder-relay-host}"
+FLOO_RELAY_HOSTKEY="${FLOO_RELAY_HOSTKEY:-}"
 
 # ─── Where to dial out (overridable for testing via env). ────────────────────────────────
-FLOO_RELAY_HOST="${FLOO_RELAY_HOST:-relay.agents-deployed.com}"
+FLOO_RELAY_HOST="${FLOO_RELAY_HOST:-}"
 FLOO_RELAY_PORT="${FLOO_RELAY_PORT:-443}"      # 443 so it survives restrictive outbound firewalls
 FLOO_RELAY_USER="${FLOO_RELAY_USER:-gw}"       # a powerless, forwarding-only account on the relay
 FLOO_RELAY_SOCK_DIR="${FLOO_RELAY_SOCK_DIR:-/run/floo}"   # path namespace ON the relay
@@ -529,19 +529,78 @@ Env overrides (testing): FLOO_NAME, FLOO_RELAY_HOST, FLOO_RELAY_PORT, FLOO_RELAY
 EOF
 }
 
+# ── operator config store (saved relay + CA per operator; supports several) ──────────────
+FLOO_CFG="${FLOO_CONFIG_DIR:-$HOME/.config/floo}/operators"
+cfg_get() { sed -n "s/.*\"$1\":\"\\([^\"]*\\)\".*/\\1/p" "$2"; }
+cmd_config() {
+  local sub="${1:-list}"; shift 2>/dev/null || true
+  case "$sub" in
+    add)
+      local name="${1:-}"; shift 2>/dev/null || true; local relay="" ca="" hk=""
+      while [ $# -gt 0 ]; do case "$1" in
+        --relay) relay="$2"; shift 2;; --operator-ca) ca="$2"; shift 2;; --relay-hostkey) hk="$2"; shift 2;; *) shift;; esac; done
+      [ -n "$name" ] && [ -n "$relay" ] && [ -n "$ca" ] || { echo "usage: floo config add NAME --relay H[:P] --operator-ca KEY [--relay-hostkey KEY]" >&2; return 1; }
+      local host="${relay%%:*}" port=443; case "$relay" in *:*) port="${relay##*:}";; esac
+      umask 077; mkdir -p "$FLOO_CFG"
+      printf '{"name":"%s","relay_host":"%s","relay_port":"%s","operator_ca":"%s","relay_hostkey":"%s"}\n' "$name" "$host" "$port" "$ca" "$hk" > "$FLOO_CFG/$name.json"
+      echo "saved operator '$name'";;
+    import)
+      local blob; blob="$(cat "${1:--}")"; local name; name="$(printf '%s' "$blob" | sed -n 's/.*"name":"\([^"]*\)".*/\1/p')"
+      [ -n "$name" ] || { echo "import: blob has no \"name\"" >&2; return 1; }
+      umask 077; mkdir -p "$FLOO_CFG"; printf '%s\n' "$blob" > "$FLOO_CFG/$name.json"; echo "imported operator '$name'";;
+    list) ls "$FLOO_CFG" 2>/dev/null | sed 's/\.json$//' || true;;
+    remove) [ -n "${1:-}" ] && rm -f "$FLOO_CFG/$1.json" && echo "removed '$1'";;
+    *) echo "floo config {add|import|list|remove}" >&2; return 1;;
+  esac
+}
+load_operator() {
+  local pick="${1:-}" f files
+  [ -d "$FLOO_CFG" ] || return 1
+  files="$(ls "$FLOO_CFG"/*.json 2>/dev/null)"; [ -n "$files" ] || return 1
+  if [ -n "$pick" ]; then f="$FLOO_CFG/$pick.json"; [ -f "$f" ] || { warn "no saved operator '$pick'"; return 1; }
+  elif [ "$(printf '%s\n' "$files" | wc -l)" = 1 ]; then f="$files"
+  else warn "several operators saved — pick one with --operator NAME:"; ls "$FLOO_CFG" 2>/dev/null | sed 's/\.json$//; s/^/    /' >&2; return 1; fi
+  [ -z "$FLOO_RELAY_HOST" ] && { FLOO_RELAY_HOST="$(cfg_get relay_host "$f")"; FLOO_RELAY_PORT="$(cfg_get relay_port "$f")"; }
+  [ -z "$FLOO_OPERATOR_CA" ] && FLOO_OPERATOR_CA="$(cfg_get operator_ca "$f")"
+  [ -z "$FLOO_RELAY_HOSTKEY" ] && FLOO_RELAY_HOSTKEY="$(cfg_get relay_hostkey "$f")"
+}
+cmd_install() {
+  local dst="${1:-$HOME/.local/bin}"
+  { [ -r "$0" ] && grep -q FLOO_VERSION "$0"; } 2>/dev/null || { echo "run 'floo install' from a downloaded floo file (not via curl|bash)" >&2; return 1; }
+  mkdir -p "$dst"; install -m755 "$0" "$dst/floo" && echo "installed floo to $dst/floo — ensure $dst is on PATH"
+}
+
 main() {
   case "${1:-}" in
-    -h|--help)    usage; exit 0 ;;
-    --version)    echo "floo $FLOO_VERSION"; exit 0 ;;
+    -h|--help) usage; exit 0;;
+    --version) echo "floo $FLOO_VERSION"; exit 0;;
+    config) shift; cmd_config "$@"; exit $?;;
+    install) shift; cmd_install "$@"; exit $?;;
   esac
+  local mode=session operator=""
+  while [ $# -gt 0 ]; do case "$1" in
+    --relay) FLOO_RELAY_HOST="${2%%:*}"; case "$2" in *:*) FLOO_RELAY_PORT="${2##*:}";; esac; shift 2;;
+    --operator-ca) FLOO_OPERATOR_CA="$2"; shift 2;;
+    --relay-hostkey) FLOO_RELAY_HOSTKEY="$2"; shift 2;;
+    --operator) operator="$2"; shift 2;;
+    --name) FLOO_NAME="$2"; shift 2;;
+    --watch) mode=watch; shift;;
+    --status) mode=status; shift;;
+    --print-name) mode=printname; shift;;
+    --show-operator) mode=showop; shift;;
+    *) warn "unknown option: $1"; usage; exit 1;;
+  esac; done
   NAME="$(resolve_name)"
-  [ -n "$NAME" ] || { warn "could not determine this box's name; set FLOO_NAME=…"; exit 1; }
-  case "${1:-}" in
-    --print-name) printf '%s\n' "$NAME"; exit 0 ;;
-    --watch)   watch_attach ;;
-    --status)  status_only ;;
-    "")        trap 'teardown' EXIT; trap 'exit 130' INT TERM HUP; run_session ;;
-    *)         warn "unknown option: $1"; usage; exit 1 ;;
+  [ "$mode" = printname ] && { printf '%s\n' "$NAME"; exit 0; }
+  if [ -z "$FLOO_RELAY_HOST" ] || [ -z "$FLOO_OPERATOR_CA" ]; then load_operator "$operator" || true; fi
+  [ "$mode" = showop ] && { printf 'relay=%s:%s\n' "$FLOO_RELAY_HOST" "$FLOO_RELAY_PORT"; exit 0; }
+  case "$mode" in
+    watch) watch_attach;;
+    status) status_only;;
+    session)
+      [ -n "$NAME" ] || { warn "could not determine this box's name; set FLOO_NAME=…"; exit 1; }
+      [ -n "$FLOO_RELAY_HOST" ] && [ -n "$FLOO_OPERATOR_CA" ] || { warn "no operator configured — pass --relay H --operator-ca KEY, or run 'floo config import' first."; exit 1; }
+      trap 'teardown' EXIT; trap 'exit 130' INT TERM HUP; run_session;;
   esac
 }
 
