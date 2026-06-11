@@ -34,8 +34,8 @@
    commit pinning today.
 2. **Relay `gw` is an internet-facing accept-any-key endpoint.** Anyone can authenticate as `gw` — but
    `gw` is powerless (reverse-unix-socket + dispatcher only), so the worst case is registering/holding a
-   botname socket (a squat, defeated by the pairing code) or resource use. Mitigations in place: charset
-   validation on every botname, lazy GC of dead sessions, connectability-gated routing. Not yet added:
+   name socket (a squat, defeated by the pairing code) or resource use. Mitigations in place: charset
+   validation on every name, lazy GC of dead sessions, connectability-gated routing. Not yet added:
    rate-limiting / fail2ban on the relay sshd — worth adding before serving many clients.
 3. **SIGKILL / power loss on the client** skips the graceful teardown, leaving a `localhost`-only sshd
    until reboot. It is **not reachable** (the tunnel and its relay socket are gone, so there is no inbound

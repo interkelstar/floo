@@ -12,7 +12,7 @@ the state-diff) layers on top of: **no live dial-out → no access.**
 | Component | Where it runs | Role |
 |---|---|---|
 | `floo` | the **client** box, as the client's user | dial out, stand up a throwaway cert-only sshd, show the pairing code, record, tear down |
-| relay (`install-relay.sh` → dedicated sshd + `gw`) | the **operator** box | dumb switchboard: maps `botname` → a client's live reverse socket; splices ciphertext |
+| relay (`install-relay.sh` → dedicated sshd + `gw`) | the **operator** box | dumb switchboard: maps `name` → a client's live reverse socket; splices ciphertext |
 | `floo-route` | relay, as `gw` (ForceCommand) | the only thing `gw` can do: register / meta / route / deregister / list |
 | `floo-authkeys` | relay (AuthorizedKeysCommand) | accept any key (so no private key is published); the `Match` block makes `gw` powerless |
 | `bin/floo-powder` | the **operator** box | ca-init / list / connect (verify code, pin host key, mint cert) / exec / close / gc |
@@ -31,7 +31,7 @@ a provisioning manifest) → `hostname -s` → `id -un`.
 
 **Operator → box** ("is this really the operator?") = an **SSH certificate**. The client's throwaway
 sshd trusts only the operator **CA public key** (embedded in `floo`, `TrustedUserCAKeys`). To
-connect, the operator mints a **≤60-minute cert**, principal = botname, signed by the CA private key
+connect, the operator mints a **≤60-minute cert**, principal = name, signed by the CA private key
 (operator box only, in no repo). The cert principal must appear in the client's `AuthorizedPrincipalsFile`
 and the login user must be the client's Unix user (`loginuser`, carried in the registration). Cert expiry
 is the backstop; the live process is the real revoke.
@@ -42,11 +42,11 @@ operator-side by `ca-init`; `install-relay.sh` deploys the matching private half
 key. `accept-new` still onboards a genuinely-new relay, but a *mismatch* against the pin is refused —
 without this, a MITM'd relay could forge the pairing code + client host key the operator relies on.
 
-**Box → operator** ("is this my real box, not a squatter on my botname?") = a **human pairing code**.
+**Box → operator** ("is this my real box, not a squatter on my name?") = a **human pairing code**.
 The client prints `XXXX-XXXX` on its own screen and registers it (with its ephemeral host public key) at
 the relay. `floo-powder connect` shows the operator the relay's copy; the operator confirms it matches
 what the client read out-of-band **before** connecting or pushing anything. The host key from the same
-registration is pinned (`UserKnownHostsFile` under `HostKeyAlias=<botname>`), so a confirmed code also
+registration is pinned (`UserKnownHostsFile` under `HostKeyAlias=<name>`), so a confirmed code also
 authenticates the box's key. Cert proves operator→box; code+pin prove box→operator. Mutual.
 
 ## Wire contract (env-overridable; defaults in `()` )
@@ -54,29 +54,29 @@ authenticates the box's key. Cert proves operator→box; code+pin prove box→op
 - relay endpoint: `FLOO_RELAY_HOST` (`relay.example.com`), `FLOO_RELAY_PORT` (`443`),
   `FLOO_RELAY_USER` (`gw`), socket namespace `FLOO_RELAY_SOCK_DIR` (`/run/floo`),
   pinned relay host key `FLOO_RELAY_HOSTKEY` (embedded; env-overridable for tests).
-- relay socket: `<sockdir>/<botname>.sock` (the client's reverse unix-socket forward).
-- relay meta: `<sockdir>/<botname>.meta` (`code`, `loginuser`, `registered`, `peer`, `hostkey`).
+- relay socket: `<sockdir>/<name>.sock` (the client's reverse unix-socket forward).
+- relay meta: `<sockdir>/<name>.meta` (`code`, `loginuser`, `registered`, `peer`, `hostkey`).
 - dispatcher commands (`$SSH_ORIGINAL_COMMAND` under the `gw` ForceCommand):
-  - `register <botname> <CODE> <loginuser> <hostkey...>`
-  - `meta <botname>` → `socket=live|absent` + the meta fields
-  - `route <botname>` → `exec nc -U <sockdir>/<botname>.sock` (the operator pivot)
-  - `deregister <botname>` → remove socket + meta (client teardown)
+  - `register <name> <CODE> <loginuser> <hostkey...>`
+  - `meta <name>` → `socket=live|absent` + the meta fields
+  - `route <name>` → `exec nc -U <sockdir>/<name>.sock` (the operator pivot)
+  - `deregister <name>` → remove socket + meta (client teardown)
   - `list` → live sessions (dead ones GC'd)
-- operator transport: `bin/floo-powder connect` writes `~/.ssh/floo.d/<botname>.conf` with a
-  `ProxyCommand ssh … gw@relay route <botname>`; then plain `ssh <botname>` / `rsync … <botname>:` work.
+- operator transport: `bin/floo-powder connect` writes `~/.ssh/floo.d/<name>.conf` with a
+  `ProxyCommand ssh … gw@relay route <name>`; then plain `ssh <name>` / `rsync … <name>:` work.
 
 ## Lifecycle
 
-1. **Client** (`floo`): snapshot the access surface → write tmpfs workdir (`$XDG_RUNTIME_DIR/floo/<botname>`, mode-0700) → ephemeral ed25519 host key → cert-only `sshd_config` → start sshd under `setsid` (own process group) → generate a throwaway client key, `register` at the relay, open `ssh -N -R <sockdir>/<botname>.sock:127.0.0.1:<port> gw@relay` under `setsid` → print the pairing code → monitor the sshd log for connect/disconnect.
-2. **Operator**: `list` → `connect <botname>` (confirm the code, pin the host key, mint the cert, drop the ssh-config include) → `ssh`/`rsync`/`exec`.
+1. **Client** (`floo`): snapshot the access surface → write tmpfs workdir (`$XDG_RUNTIME_DIR/floo/<name>`, mode-0700) → ephemeral ed25519 host key → cert-only `sshd_config` → start sshd under `setsid` (own process group) → generate a throwaway client key, `register` at the relay, open `ssh -N -R <sockdir>/<name>.sock:127.0.0.1:<port> gw@relay` under `setsid` → print the pairing code → monitor the sshd log for connect/disconnect.
+2. **Operator**: `list` → `connect <name>` (confirm the code, pin the host key, mint the cert, drop the ssh-config include) → `ssh`/`rsync`/`exec`.
 3. **Teardown** (Ctrl-C / window close / any exit): `kill -- -PGID` the tunnel and sshd groups (reaps every forked child — no orphans) → best-effort `deregister` at the relay → confirm the local port is unbound → after-snapshot + diff → wipe the tmpfs workdir. The recording + any change-diff are copied to `~/.floo-last-session` first.
 
 ## Two payloads on one substrate
 
-- **Audit (read-only):** `floo-powder exec <botname> < snapshot.sh` (the `openclaw-client-audit`
+- **Audit (read-only):** `floo-powder exec <name> < snapshot.sh` (the `openclaw-client-audit`
   recipe). Recorded on the client; the operator gets the verdict.
 - **Upgrade (mutating):** the toolbox is **pushed from the operator** after connecting
-  (`rsync … <botname>:`), never pulled — no repo credential ever lands on a client box. The upgrade
+  (`rsync … <name>:`), never pulled — no repo credential ever lands on a client box. The upgrade
   replays a versioned, validated artifact (toolbox@tag + `_scripts` + `contract.sh` guards), not
   keystrokes; stop-on-drift if a guard fails.
 
