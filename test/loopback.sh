@@ -99,7 +99,7 @@ fi
 PTYRUN_LOG="$WORK/client.log" PTYRUN_PIDFILE="$WORK/client.pid" \
   python3 "$REPO/test/ptyrun.py" \
     env -i HOME="$THOME" PATH="$PATH" XDG_RUNTIME_DIR="$RUN" TERM=xterm \
-    FLOO_BOTNAME=testbot FLOO_RELAY_HOST=127.0.0.1 FLOO_RELAY_PORT="$PORT" \
+    FLOO_NAME=testbot FLOO_RELAY_HOST=127.0.0.1 FLOO_RELAY_PORT="$PORT" \
     FLOO_RELAY_USER="$ME" FLOO_RELAY_SOCK_DIR="$SOCK" \
     FLOO_RELAY_HOSTKEY="$(cat "$RELAY/hostkey.pub")" \
     bash "$REPO/floo" &

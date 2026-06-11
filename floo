@@ -61,18 +61,13 @@ warn() { printf '%s⚠%s %s\n' "$Y" "$X" "$*"; }
 # ─── Resolve the botname (our natural key: the box's unique name). ────────────────────────
 # Order: explicit override → deployment.json field → the Cockpit URL prefix → hostname
 # label → the Unix username (provisioning sets user = botname). All cheap, all local.
-resolve_botname() {
-  if [ -n "${FLOO_BOTNAME:-}" ]; then printf '%s' "$FLOO_BOTNAME"; return; fi
-  local dep="$HOME/.openclaw/deployment.json" n=""
-  if [ -f "$dep" ] && command -v jq >/dev/null 2>&1; then
-    n="$(jq -r '.client.botname // empty' "$dep" 2>/dev/null)"
-    [ -z "$n" ] && n="$(jq -r '.surfaces.cockpit.url // empty' "$dep" 2>/dev/null | sed -E 's#^https?://##; s#\..*##')"
+resolve_name() {
+  [ -n "${FLOO_NAME:-}" ] && { printf '%s' "$FLOO_NAME"; return; }
+  if [ -n "${FLOO_IDENTITY_HOOK:-}" ] && [ -x "$FLOO_IDENTITY_HOOK" ]; then
+    local n; n="$("$FLOO_IDENTITY_HOOK" 2>/dev/null)"; [ -n "$n" ] && { printf '%s' "$n"; return; }
   fi
-  [ -z "$n" ] && case "$(hostname -f 2>/dev/null || hostname)" in
-    *.agents-deployed.com|*.kelstar.me) n="$(hostname -s 2>/dev/null)";;
-  esac
-  [ -z "$n" ] && n="$(id -un)"
-  printf '%s' "$n"
+  local h; h="$(hostname -s 2>/dev/null)"; [ -n "$h" ] && { printf '%s' "$h"; return; }
+  id -un
 }
 
 # stable, private, tmpfs-backed home for this session's state (enables --watch + a clean wipe)
@@ -109,7 +104,7 @@ snapshot_surface() {
 }
 
 # ─── Build the throwaway SSH endpoint (in tmpfs; nothing on durable disk). ────────────────
-WORKDIR=""; SSHD_PID=""; TUNNEL_PID=""; MONITOR_PID=""; BOTNAME=""; SSHD_PORT=""
+WORKDIR=""; SSHD_PID=""; TUNNEL_PID=""; MONITOR_PID=""; NAME=""; SSHD_PORT=""
 PAIRCODE=""; BEFORE=""; AFTER=""; CONNECT_LOGGED=0
 
 build_endpoint() {
@@ -124,8 +119,8 @@ build_endpoint() {
   else
     warn "relay host key is not pinned — falling back to trust-on-first-use for the relay."
   fi
-  printf '%s\n' "$BOTNAME" > "$WORKDIR/principals"      # the cert principal we will accept
-  ssh-keygen -t ed25519 -f "$WORKDIR/hostkey" -N '' -q -C "floo-$BOTNAME"
+  printf '%s\n' "$NAME" > "$WORKDIR/principals"      # the cert principal we will accept
+  ssh-keygen -t ed25519 -f "$WORKDIR/hostkey" -N '' -q -C "floo-$NAME"
 
   # the recorder: every command the operator runs, and its output, is teed to your disk.
   cat > "$WORKDIR/record-session" <<'REC'
@@ -275,11 +270,11 @@ relay_ssh() {  # helper: run a one-shot command on the relay's gw account
 }
 
 register_and_tunnel() {
-  ssh-keygen -t ed25519 -f "$WORKDIR/clientkey" -N '' -q -C "floo-tunnel-$BOTNAME"
+  ssh-keygen -t ed25519 -f "$WORKDIR/clientkey" -N '' -q -C "floo-tunnel-$NAME"
   local hostpub; hostpub="$(cat "$WORKDIR/hostkey.pub")"
 
   info "registering the session with the relay…"
-  if ! relay_ssh register "$BOTNAME" "$PAIRCODE" "$(id -un)" "$hostpub"; then
+  if ! relay_ssh register "$NAME" "$PAIRCODE" "$(id -un)" "$hostpub"; then
     warn "could not reach the relay at $FLOO_RELAY_HOST:$FLOO_RELAY_PORT — is the network up?"
     return 1
   fi
@@ -292,7 +287,7 @@ register_and_tunnel() {
       -o ServerAliveInterval=15 -o ServerAliveCountMax=3 \
       -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile="$WORKDIR/relay_known_hosts" \
       -i "$WORKDIR/clientkey" \
-      -R "$FLOO_RELAY_SOCK_DIR/$BOTNAME.sock:127.0.0.1:$SSHD_PORT" \
+      -R "$FLOO_RELAY_SOCK_DIR/$NAME.sock:127.0.0.1:$SSHD_PORT" \
       "$FLOO_RELAY_USER@$FLOO_RELAY_HOST" &
   TUNNEL_PID=$!
   sleep 1.2
@@ -328,20 +323,20 @@ monitor() {
 
 # ─── Read-only watch attach (second window: `floo --watch`). ───────────────────────
 watch_attach() {
-  local dir; dir="$(session_dir "$BOTNAME")"
+  local dir; dir="$(session_dir "$NAME")"
   [ -d "$dir" ] || { warn "no support session is open right now."; exit 1; }
-  ok "attached read-only to the $BOTNAME support session — what the technician runs scrolls below."
+  ok "attached read-only to the $NAME support session — what the technician runs scrolls below."
   say "${D}(Ctrl-C just closes this view; it does NOT end the session.)${X}"
   # follow whatever recordings exist now and appear later
   tail -n +1 -F "$dir"/recording/*.log 2>/dev/null
 }
 
 status_only() {
-  local dir; dir="$(session_dir "$BOTNAME")"
+  local dir; dir="$(session_dir "$NAME")"
   if [ -d "$dir" ] && [ -f "$dir/watch.pid" ] && kill -0 "$(cat "$dir/watch.pid" 2>/dev/null)" 2>/dev/null; then
-    ok "a support session for '$BOTNAME' is OPEN (pid $(cat "$dir/watch.pid"))."; exit 0
+    ok "a support session for '$NAME' is OPEN (pid $(cat "$dir/watch.pid"))."; exit 0
   fi
-  info "no support session for '$BOTNAME' is open."; exit 1
+  info "no support session for '$NAME' is open."; exit 1
 }
 
 # ─── Make a recording readable: strip terminal control sequences. ────────────────────────
@@ -433,7 +428,7 @@ teardown() {
 
   # tidy up the relay: drop our (now-dead) socket + registration. Best-effort.
   local dereg_ok=0
-  [ -f "$WORKDIR/clientkey" ] && relay_ssh deregister "$BOTNAME" >/dev/null 2>&1 && dereg_ok=1
+  [ -f "$WORKDIR/clientkey" ] && relay_ssh deregister "$NAME" >/dev/null 2>&1 && dereg_ok=1
 
   # THE REVOKE is the local endpoint being down — that, not the relay socket, is the access path.
   # Confirm it, retrying a harder kill if needed; only then claim revoked.
@@ -482,11 +477,11 @@ run_session() {
   [ "$(id -u)" = 0 ] && warn "you are running as root; support is designed to run as your own user."
 
   say ""
-  say "${B}floo${X} — temporary, recorded help for ${B}$BOTNAME${X}"
+  say "${B}floo${X} — temporary, recorded help for ${B}$NAME${X}"
   say "${D}Access lasts only while this window is open. Ctrl-C ends it. Nothing is installed.${X}"
   say ""
 
-  WORKDIR="$(session_dir "$BOTNAME")"
+  WORKDIR="$(session_dir "$NAME")"
   # refuse a pre-planted symlink (a local attacker redirecting our key/recording writes), both
   # before and after creation (umask 077 already makes the dirs owner-only).
   [ -L "$WORKDIR" ] && { warn "session dir $WORKDIR is a symlink — refusing."; exit 1; }
@@ -530,7 +525,7 @@ Usage:
   floo --status     print whether a session is currently open, then exit
   floo --help | --version
 
-Env overrides (testing): FLOO_BOTNAME, FLOO_RELAY_HOST, FLOO_RELAY_PORT, FLOO_RELAY_USER.
+Env overrides (testing): FLOO_NAME, FLOO_RELAY_HOST, FLOO_RELAY_PORT, FLOO_RELAY_USER.
 EOF
 }
 
@@ -539,9 +534,10 @@ main() {
     -h|--help)    usage; exit 0 ;;
     --version)    echo "floo $FLOO_VERSION"; exit 0 ;;
   esac
-  BOTNAME="$(resolve_botname)"
-  [ -n "$BOTNAME" ] || { warn "could not determine this box's name; set FLOO_BOTNAME=…"; exit 1; }
+  NAME="$(resolve_name)"
+  [ -n "$NAME" ] || { warn "could not determine this box's name; set FLOO_NAME=…"; exit 1; }
   case "${1:-}" in
+    --print-name) printf '%s\n' "$NAME"; exit 0 ;;
     --watch)   watch_attach ;;
     --status)  status_only ;;
     "")        trap 'teardown' EXIT; trap 'exit 130' INT TERM HUP; run_session ;;
