@@ -21,6 +21,7 @@ CA="$FLOO_HOME/ca/operator_ca"
 RELAY_KEY="$FLOO_HOME/relay_id_ed25519"      # operator's CLIENT key, to auth to the gw account
 RELAY_HOSTKEY="$FLOO_HOME/relay_hostkey"     # the relay's HOST key (pinned; deployed by install-relay.sh)
 SSH_DROPIN_DIR="$HOME/.ssh/floo.d"
+SELF="$(readlink -f "$0" 2>/dev/null || echo "$0")"; SD="$(cd "$(dirname "$SELF")" && pwd)"
 [ -f "$FLOO_HOME/relay.env" ] && . "$FLOO_HOME/relay.env"
 RELAY_HOST="${FLOO_RELAY_HOST:-${RELAY_HOST:-relay.agents-deployed.com}}"
 RELAY_PORT="${FLOO_RELAY_PORT:-${RELAY_PORT:-443}}"
@@ -169,7 +170,7 @@ cmd_init() {
   [ -n "$host" ] || die "could not determine the relay's public host — set FLOO_RELAY_PUBLIC_HOST=<host>"
   if [ -z "${FLOO_INIT_NO_RELAY:-}" ]; then
     echo "standing up the relay on this box (sudo)…"
-    sudo "$(dirname "$0")/../relay/install-relay.sh" || die "relay install failed"
+    sudo "$SD/../relay/install-relay.sh" || die "relay install failed"
   fi
   local ca hk; ca="$(cat "$CA.pub")"
   # prefer the ACTUAL deployed relay host key (what clients will pin); fall back to the operator's
@@ -184,7 +185,17 @@ cmd_init() {
     "${FLOO_OPERATOR_NAME:-$(hostname -s)}" "$host" "$port" "$ca" "$hk"
 }
 
+cmd_install() {
+  local dst="${1:-$HOME/.local/bin}"; mkdir -p "$dst"
+  ln -sf "$SELF" "$dst/floo-powder"
+  local client; client="$(readlink -f "$SD/../floo" 2>/dev/null)"
+  [ -n "$client" ] && [ -f "$client" ] && ln -sf "$client" "$dst/floo"
+  echo "linked floo-powder${client:+ + floo} into $dst"
+  case ":$PATH:" in *":$dst:"*) ;; *) echo "note: add $dst to your PATH (e.g. in ~/.zshrc)";; esac
+}
+
 case "${1:-}" in
+  install) shift; cmd_install "$@";;
   init)    shift; cmd_init "$@";;
   ca-init) shift; cmd_ca_init "$@";;
   list)    shift; cmd_list "$@";;

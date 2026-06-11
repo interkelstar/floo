@@ -60,13 +60,13 @@ is that it runs as *your* user, is recorded, and any change to your access surfa
 
 ```sh
 git clone https://github.com/interkelstar/floo && cd floo
-sudo ./relay/install-relay.sh            # stand up the relay (isolated sshd on :443) — or:
-bin/floo-powder init                     # turnkey: keys + relay + prints the client one-liner & config blob
+bin/floo-powder install                  # symlink floo-powder (+ floo) into ~/.local/bin — then drop the bin/ prefix
+floo-powder init                         # turnkey: keys + relay + prints the client one-liner & config blob
 
-bin/floo-powder list                     # clients with an open session (+ pairing code)
-bin/floo-powder connect <name>           # type the code the CLIENT reads you, get a shell
-bin/floo-powder exec <name> < audit.sh   # run a script non-interactively (recorded on the client)
-bin/floo-powder close <name>             # drop operator-side routing
+floo-powder list                     # clients with an open session (+ pairing code)
+floo-powder connect <name>           # type the code the CLIENT reads you, get a shell
+floo-powder exec <name> < audit.sh   # run a script non-interactively (recorded on the client)
+floo-powder close <name>             # drop operator-side routing
 ```
 
 `floo-powder init` prints the exact one-liner (and an importable config blob) to hand to clients. The
