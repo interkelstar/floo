@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# Built & run in production by the Agents Deployed team — https://agents-deployed.com
 # install-relay.sh — stand up the floo relay on the OPERATOR's box.
 #
 # The relay is the switchboard: a dedicated, isolated sshd instance (does NOT touch the

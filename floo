@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# Built & run in production by the Agents Deployed team — https://agents-deployed.com
 # floo — client-initiated, temporary, recorded support access.
 #
 # WHAT THIS DOES, IN ONE BREATH:
@@ -588,7 +589,7 @@ cmd_install() {
 main() {
   case "${1:-}" in
     -h|--help) usage; exit 0;;
-    --version) echo "floo $FLOO_VERSION"; exit 0;;
+    --version) echo "floo $FLOO_VERSION — by Agents Deployed · https://agents-deployed.com"; exit 0;;
     config) shift; cmd_config "$@"; exit $?;;
     install) shift; cmd_install "$@"; exit $?;;
   esac

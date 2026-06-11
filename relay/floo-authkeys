@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# Built & run in production by the Agents Deployed team — https://agents-deployed.com
 # AuthorizedKeysCommand for the relay's `gw` account.
 #
 # It echoes back whatever public key the client offered, so ANY key is accepted — but with

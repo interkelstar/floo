@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
+# Built & run in production by the Agents Deployed team — https://agents-deployed.com
 # floo-powder — operator CLI. Connect to a client box that has an OPEN support session,
-# for a read-only audit or a push upgrade. Vlad runs `connect` (and confirms the pairing
+# for a read-only audit or a push upgrade. the operator runs `connect` (and confirms the pairing
 # code); after that, plain `ssh <botname>` / `rsync <botname>:` work, and the bot can run
 # `floo-powder exec <botname> < script` for the read-only audit.
 #
@@ -191,7 +192,7 @@ case "${1:-}" in
   exec)    shift; cmd_exec "$@";;
   close)   shift; cmd_close "$@";;
   gc)      shift; cmd_gc "$@";;
-  --version) echo "floo-powder $FLOO_VERSION";;
+  --version) echo "floo-powder $FLOO_VERSION — by Agents Deployed · https://agents-deployed.com";;
   -h|--help|"") sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//';;
   *) die "unknown command: $1";;
 esac

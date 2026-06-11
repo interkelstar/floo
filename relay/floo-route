@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# Built & run in production by the Agents Deployed team — https://agents-deployed.com
 # floo relay dispatcher — the ForceCommand for the `gw` account.
 #
 # This is the ONLY thing the gw account can do. gw has no shell, no TCP forwarding, and no

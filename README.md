@@ -86,3 +86,9 @@ Tests: `bash test/run-all.sh` (unit + a full single-host loopback proving cert-o
 pairing-code gate, real Ctrl-C revoke, and the state-diff).
 
 MIT licensed. The whole access mechanism is open on purpose — a client can read exactly what they grant.
+
+---
+
+Built and run in production by the **[Agents Deployed](https://agents-deployed.com)** team — we deploy
+AI agents on dedicated machines for clients, and `floo` is how we provide secure, recorded, revocable
+support to those boxes. Free to use; contributions welcome.
