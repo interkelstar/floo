@@ -51,6 +51,7 @@ FLOO_RELAY_PORT="${FLOO_RELAY_PORT:-443}"      # 443 so it survives restrictive 
 FLOO_RELAY_USER="${FLOO_RELAY_USER:-gw}"       # a powerless, forwarding-only account on the relay
 FLOO_RELAY_SOCK_DIR="${FLOO_RELAY_SOCK_DIR:-/run/floo}"   # path namespace ON the relay
 FLOO_RELAY_PIN="${FLOO_RELAY_PIN:-}"            # short relay-hostkey fingerprint (pin-bootstrap)
+FLOO_PUBLIC="${FLOO_PUBLIC:-0}"                 # --public: no-CA "quick" mode; the code IS the credential
 
 # ─── Cosmetic ────────────────────────────────────────────────────────────────────────────
 if [ -t 1 ]; then B=$'\e[1m'; D=$'\e[2m'; G=$'\e[32m'; Y=$'\e[33m'; R=$'\e[31m'; X=$'\e[0m'
@@ -61,6 +62,7 @@ ok()   { printf '%s✓%s %s\n' "$G" "$X" "$*"; }
 warn() { printf '%s⚠%s %s\n' "$Y" "$X" "$*"; }
 
 codehash() { printf '%s' "$1" | sha256sum | cut -c1-64; }   # pairing code never leaves the box in clear
+norm() { printf '%s' "$1" | tr 'a-z' 'A-Z'; }               # uniform code casing for sha256 + HMAC on both ends
 
 # ─── Resolve this box's name (our natural key: the box's unique label). ───────────────────
 # Order: --name / FLOO_NAME -> FLOO_IDENTITY_HOOK (a script printing the name; how a deployment
@@ -111,12 +113,11 @@ snapshot_surface() {
 }
 
 # ─── Build the throwaway SSH endpoint (in tmpfs; nothing on durable disk). ────────────────
-WORKDIR=""; SSHD_PID=""; TUNNEL_PID=""; MONITOR_PID=""; NAME=""; SID=""; SSHD_PORT=""
+WORKDIR=""; SSHD_PID=""; TUNNEL_PID=""; MONITOR_PID=""; BINDWATCH_PID=""; NAME=""; SID=""; SSHD_PORT=""
 PAIRCODE=""; BEFORE=""; AFTER=""; CONNECT_LOGGED=0
 
 build_endpoint() {
   mkdir -p "$WORKDIR/recording"
-  printf '%s\n' "$FLOO_OPERATOR_CA" > "$WORKDIR/operator_ca.pub"
 
   # pre-pin the relay's host key. ssh's accept-new still adds a genuinely-new host, but a
   # MISMATCH against this pin (a MITM presenting a different key) is refused.
@@ -132,6 +133,23 @@ build_endpoint() {
   SID="$(head -c8 /dev/urandom | od -An -tx1 | tr -d ' \n')"   # random, non-secret session id: routing + cert principal
   printf '%s\n' "$SID" > "$WORKDIR/principals"      # the cert principal we will accept (the sid, not the name)
   ssh-keygen -t ed25519 -f "$WORKDIR/hostkey" -N '' -q -C "floo-$NAME"
+
+  # Choose the box's auth gate by mode. CA mode: only the operator's CA-signed cert (principal=sid) gets in.
+  # NO-CERT mode: no CA at all — authorized_keys starts EMPTY and the bind_watcher writes the single operator
+  # key only after it verifies HMAC(code, opkey). The code is the credential; the long code is the entropy.
+  if [ "$FLOO_PUBLIC" = 1 ]; then
+    : > "$WORKDIR/authorized_keys"; chmod 600 "$WORKDIR/authorized_keys"
+    AUTH_BLOCK="PubkeyAuthentication yes
+AuthenticationMethods publickey
+AuthorizedKeysFile $WORKDIR/authorized_keys"
+  else
+    printf '%s\n' "$FLOO_OPERATOR_CA" > "$WORKDIR/operator_ca.pub"
+    AUTH_BLOCK="PubkeyAuthentication yes
+AuthenticationMethods publickey
+TrustedUserCAKeys $WORKDIR/operator_ca.pub
+AuthorizedPrincipalsFile $WORKDIR/principals
+AuthorizedKeysFile /nonexistent"
+  fi
 
   # the recorder: every command the operator runs, and its output, is teed to your disk.
   cat > "$WORKDIR/record-session" <<'REC'
@@ -247,11 +265,7 @@ UsePAM no
 PasswordAuthentication no
 KbdInteractiveAuthentication no
 ChallengeResponseAuthentication no
-PubkeyAuthentication yes
-AuthenticationMethods publickey
-TrustedUserCAKeys $WORKDIR/operator_ca.pub
-AuthorizedPrincipalsFile $WORKDIR/principals
-AuthorizedKeysFile /nonexistent
+$AUTH_BLOCK
 AllowUsers $(id -un)
 # operator gets a shell to help you, nothing more — no forwarding back through your box
 AllowTcpForwarding no
@@ -275,9 +289,21 @@ start_sshd() {
 }
 
 pairing_code() {
-  # short human code the operator must read back to you; binds the relay record to THIS run
-  PAIRCODE="$(head -c4 /dev/urandom | od -An -tx1 | tr -d ' \n' | tr 'a-f' 'A-F')"
-  PAIRCODE="${PAIRCODE:0:4}-${PAIRCODE:4:4}"
+  if [ "$FLOO_PUBLIC" = 1 ]; then
+    # NO-CERT MODE: the code IS the credential against an untrusted relay, so it must be high-entropy
+    # (>=64 bits). 13 base32 chars ~= 65 bits; fall back to 16 hex (64 bits) where base32 is absent.
+    local raw
+    if command -v base32 >/dev/null 2>&1; then
+      raw="$(head -c9 /dev/urandom | base32 | tr -dc 'A-Z2-7' | cut -c1-13)"
+    else
+      raw="$(head -c8 /dev/urandom | od -An -tx1 | tr -d ' \n' | tr 'a-f' 'A-F')"
+    fi
+    PAIRCODE="$(printf '%s' "$raw" | sed 's/.\{4\}/&-/g; s/-$//')"   # group every 4 chars
+  else
+    # CA MODE: the cert is the gate, so a short 32-bit pairing token is fine.
+    PAIRCODE="$(head -c4 /dev/urandom | od -An -tx1 | tr -d ' \n' | tr 'a-f' 'A-F')"
+    PAIRCODE="${PAIRCODE:0:4}-${PAIRCODE:4:4}"
+  fi
 }
 
 relay_ssh() {  # helper: run a one-shot command on the relay's gw account
@@ -295,7 +321,8 @@ register_and_tunnel() {
   local hostpub; hostpub="$(cat "$WORKDIR/hostkey.pub")"
 
   info "registering the session with the relay…"
-  if ! relay_ssh register "$SID" "$(codehash "$PAIRCODE")" "$(id -un)" "$NAME" "$hostpub"; then
+  local qflag=""; [ "$FLOO_PUBLIC" = 1 ] && qflag="quick=1"
+  if ! relay_ssh register "$SID" "$(codehash "$(norm "$PAIRCODE")")" "$(id -un)" "$NAME" $qflag "$hostpub"; then
     warn "could not reach the relay at $FLOO_RELAY_HOST:$FLOO_RELAY_PORT — is the network up?"
     return 1
   fi
@@ -339,6 +366,30 @@ monitor() {
       [ "$idle" -ge 8 ] && { printf '%s○ technician finished — press Ctrl-C to close, or leave open if they reconnect%s\n' "$D" "$X"; shown=0; idle=0; }
     fi
     sleep 1
+  done
+}
+
+# ─── No-cert bind: authorize the operator's ephemeral key after verifying the code-proof. ────────
+# PUBLIC MODE only. The operator binds (at the relay) an ephemeral key + auth=HMAC(code,opkey). We poll
+# getop, verify the HMAC ourselves (only the code-holder can forge it), and authorize the FIRST bind that
+# verifies — skipping inert griefer binds. sshd reads authorized_keys per-connection, so no reload needed.
+bind_watcher() {
+  local got auth opkey calc authorized=0
+  while kill -0 "$TUNNEL_PID" 2>/dev/null; do
+    if [ "$authorized" = 0 ]; then
+      got="$(relay_ssh getop "$SID" 2>/dev/null)" || { sleep 2; continue; }
+      while IFS=' ' read -r auth opkey; do
+        [ -n "$auth" ] && [ -n "$opkey" ] || continue
+        calc="$(printf '%s' "$opkey" | openssl dgst -sha256 -hmac "$(norm "$PAIRCODE")" | awk '{print $NF}')"
+        if [ "$calc" = "$auth" ]; then
+          printf '%s\n' "$opkey" > "$WORKDIR/authorized_keys.tmp"; chmod 600 "$WORKDIR/authorized_keys.tmp"
+          mv "$WORKDIR/authorized_keys.tmp" "$WORKDIR/authorized_keys"   # atomic swap; live per-connection
+          ok "operator verified by the code — they can connect now."
+          authorized=1; break
+        fi
+      done <<<"$got"
+    fi
+    sleep 2
   done
 }
 
@@ -441,6 +492,7 @@ teardown() {
   info "closing the support session…"
   # kill whole process groups (negative pid) so no forked sshd/ssh child is orphaned
   [ -n "$MONITOR_PID" ] && kill "$MONITOR_PID" 2>/dev/null
+  [ -n "$BINDWATCH_PID" ] && kill "$BINDWATCH_PID" 2>/dev/null
   [ -n "$TUNNEL_PID" ] && kill -TERM "-$TUNNEL_PID" 2>/dev/null
   [ -n "$SSHD_PID" ]   && kill -TERM "-$SSHD_PID"   2>/dev/null
   sleep 0.5
@@ -516,16 +568,25 @@ run_session() {
   register_and_tunnel || { teardown; exit 1; }
 
   say ""
-  ok "your box is now reachable by the operator — and ONLY by the operator's published key."
-  say ""
-  say "  ${B}Read this code back to whoever is helping you:${X}   ${B}$PAIRCODE${X}"
-  say "  ${D}They must repeat it before connecting. If their copy doesn't match, do NOT proceed —${X}"
-  say "  ${D}it means someone else is trying to answer. Just close this window.${X}"
+  if [ "$FLOO_PUBLIC" = 1 ]; then
+    ok "your box is reachable in NO-CERT mode — the code below is the ONLY thing that grants access."
+    say ""
+    say "  ${B}Give this code ONLY to the person you want to help you:${X}   ${B}$PAIRCODE${X}"
+    say "  ${D}Anyone who learns this code can connect. It's long on purpose. Don't post it anywhere;${X}"
+    say "  ${D}read it to one person you trust. Close this window the moment you're done.${X}"
+  else
+    ok "your box is now reachable by the operator — and ONLY by the operator's published key."
+    say ""
+    say "  ${B}Read this code back to whoever is helping you:${X}   ${B}$PAIRCODE${X}"
+    say "  ${D}They must repeat it before connecting. If their copy doesn't match, do NOT proceed —${X}"
+    say "  ${D}it means someone else is trying to answer. Just close this window.${X}"
+  fi
   say ""
   info "watching for the technician to connect… (open a second window and run this with --watch to see what they do)"
   say ""
 
   monitor & MONITOR_PID=$!
+  if [ "$FLOO_PUBLIC" = 1 ]; then bind_watcher & BINDWATCH_PID=$!; fi
   # block until the tunnel or endpoint dies, or the user interrupts
   wait "$TUNNEL_PID" 2>/dev/null
 }
@@ -542,6 +603,7 @@ window) revokes it. Nothing is installed, nothing runs as root, nothing survives
 
 Usage:
   floo                      open a support session using a saved operator (see config below)
+  floo --public             open a NO-CERT session (code-only; any operator with the code, no CA)
   floo --relay H[:P] --operator-ca KEY [--relay-hostkey KEY] [--name N]
                             open a session with the operator passed inline (ad-hoc)
   floo --operator NAME      pick which saved operator to use
@@ -615,6 +677,7 @@ bootstrap_from_relay() {
     warn "relay fingerprint ($got) does NOT match your pin ($FLOO_RELAY_PIN) — possible MITM or wrong code. Refusing."; exit 1
   fi
   FLOO_RELAY_HOSTKEY="ssh-ed25519 $blob"   # pin verified → trust this relay host key for the session
+  if [ "$FLOO_PUBLIC" = 1 ]; then ok "relay verified (pin matches) — no-cert mode, no operator key to fetch."; return 0; fi
   tmp="$(mktemp -d "${TMPDIR:-/tmp}/floo-bs.XXXXXX")"
   local rt; if [ "$FLOO_RELAY_PORT" = 22 ]; then rt="$FLOO_RELAY_HOST"; else rt="[$FLOO_RELAY_HOST]:$FLOO_RELAY_PORT"; fi
   printf '%s %s\n' "$rt" "$FLOO_RELAY_HOSTKEY" > "$tmp/kh"
@@ -642,6 +705,7 @@ main() {
     --operator) operator="$2"; shift 2;;
     --pin) FLOO_RELAY_PIN="$2"; shift 2;;
     --name) FLOO_NAME="$2"; shift 2;;
+    --public) FLOO_PUBLIC=1; shift;;
     --watch) mode=watch; shift;;
     --status) mode=status; shift;;
     --print-name) mode=printname; shift;;
@@ -662,7 +726,12 @@ main() {
     status) status_only;;
     session)
       [ -n "$NAME" ] || { warn "could not determine this box's name; set FLOO_NAME=…"; exit 1; }
-      [ -n "$FLOO_RELAY_HOST" ] && [ -n "$FLOO_OPERATOR_CA" ] || { warn "no operator configured — pass --relay H --operator-ca KEY, or run 'floo config import' first."; exit 1; }
+      if [ "$FLOO_PUBLIC" = 1 ]; then
+        [ -n "$FLOO_RELAY_HOST" ] || { warn "no relay configured — pass --relay H[:P] (and --pin FP), or import a config."; exit 1; }
+        command -v openssl >/dev/null 2>&1 || { warn "public mode needs openssl (for the code proof) — install it."; exit 1; }
+      else
+        [ -n "$FLOO_RELAY_HOST" ] && [ -n "$FLOO_OPERATOR_CA" ] || { warn "no operator configured — pass --relay H --operator-ca KEY, or run 'floo config import' first."; exit 1; }
+      fi
       trap 'teardown' EXIT; trap 'exit 130' INT TERM HUP; run_session;;
   esac
 }
