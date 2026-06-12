@@ -64,15 +64,20 @@ is that it runs as *your* user, is recorded, and any change to your access surfa
 
 ## For the operator
 
-`floo-powder` is **one self-contained file** — the relay (`floo-route` + its installer) is embedded, so
-there's nothing else to clone. Fetch it, read it, install it, and stand up your relay:
+`floo-powder` is **one self-contained file** — the relay (`floo-route`, `floo-authkeys`, and its
+installer) is embedded as **plain, readable bash** (verbatim heredocs, not opaque blobs), so there's
+nothing else to clone and you can audit exactly what gets root. Fetch it, read it, install it, stand up
+your relay:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/interkelstar/floo/v0.3.0/bin/floo-powder -o floo-powder
-less floo-powder                     # read exactly what you're about to run
+curl -fsSL https://raw.githubusercontent.com/interkelstar/floo/v0.3.1/bin/floo-powder -o floo-powder
+less floo-powder                     # read it — incl. the embedded relay that `init` sudo-runs, inline + readable
 sh floo-powder install               # install into ~/.local/bin (self-fetches if piped)
 floo-powder init                     # turnkey: keys + stands up the embedded relay + prints the client one-liner
 ```
+
+`floo-powder relay-extract <dir>` writes the embedded relay scripts out if you'd rather read or diff
+them as separate files.
 
 (One-shot, no install: `curl -fsSL https://…/bin/floo-powder | bash -s -- init`.)
 

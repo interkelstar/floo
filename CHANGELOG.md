@@ -1,4 +1,11 @@
 # Changelog
+## 0.3.1 — 2026-06-12
+- the embedded relay is now **readable**: floo-powder carries floo-route/floo-authkeys/install-relay.sh
+  as verbatim bash (quoted heredocs), not base64. "Don't trust us — read us" now holds for the operator
+  file too — `less floo-powder` shows exactly what `init` writes out and sudo-runs (it runs as root).
+  (v0.3.0 embedded the same code as opaque base64, which defeated readability.) Smaller file, too.
+- `test/unit/embed.sh` gains a guard that fails if the embed ever regresses to a base64 blob.
+
 ## 0.3.0 — 2026-06-12
 - self-contained operator: `floo-powder` is now a single file with the relay (`floo-route`,
   `floo-authkeys`, `install-relay.sh`) embedded — no git clone needed. Operator onboarding is

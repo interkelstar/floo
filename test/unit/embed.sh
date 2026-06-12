@@ -15,10 +15,17 @@ bash "$ROOT/scripts/embed.sh" --check >/dev/null 2>&1 \
   && ok "embedded payload in sync with relay/ source" \
   || bad "DRIFT — run scripts/embed.sh (relay/ edited without re-embedding)"
 
-# 2. the payload vars are actually populated (catches a committed empty placeholder block)
-for v in FLOO_EMBED_ROUTE_B64 FLOO_EMBED_AUTHKEYS_B64 FLOO_EMBED_INSTALL_RELAY_B64; do
-  grep -qE "^$v='[A-Za-z0-9+/=]+'" "$POWDER" && ok "$v is embedded (non-empty)" || bad "$v is empty/missing"
+# 2. the embed is READABLE verbatim bash (quoted heredocs), NOT an opaque base64 blob — this is the
+#    "don't trust us, read us" property: an operator can `less floo-powder` and audit what init sudo-runs.
+for f in floo-route floo-authkeys install-relay.sh; do
+  grep -qF "cat > \"\$d/$f\" <<'" "$POWDER" && ok "$f embedded as a readable heredoc" || bad "$f heredoc opener missing"
 done
+# a distinctive line from each source must appear verbatim in floo-powder (proves it's the real code inline)
+grep -qF 'ForceCommand /usr/local/bin/floo-route' "$POWDER" && ok "install-relay.sh body is inline + readable" || bad "install-relay.sh body not inline"
+grep -qF 'the relay is a DUMB PIVOT' "$POWDER" 2>/dev/null || grep -qF 'DUMB PIVOT' "$POWDER" && ok "floo-route body is inline + readable" || bad "floo-route body not inline"
+# guard against a regression back to base64: no enormous single-token line in the embedded block
+awk '/BEGIN EMBEDDED RELAY PAYLOAD/{f=1} f{ if ($0 ~ /^[A-Za-z0-9_]+='\''[A-Za-z0-9+\/=]{200,}'\''$/) b=1 } /END EMBEDDED RELAY PAYLOAD/{f=0} END{exit b}' "$POWDER" \
+  && ok "no base64 blob in the embedded block (stays readable)" || bad "found a base64-looking blob — embed regressed to opaque"
 
 # 3. runtime materialization reproduces every relay/ file byte-for-byte, executable
 d=$(mktemp -d)
