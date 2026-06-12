@@ -15,10 +15,11 @@
 #   floo-powder exec <handle>           run stdin on the box non-interactively (the bot/audit path)
 #   floo-powder close <handle>          tear down operator-side routing for a box
 #   floo-powder gc                      drop routing for sessions that are no longer live
+#   floo-powder relay-install           stand up / refresh the relay from ~/.config/floo keys (reuses host key → same pin)
 set -euo pipefail
 
 FLOO_HOME="${FLOO_HOME:-$HOME/.config/floo}"
-FLOO_VERSION="0.3.1"
+FLOO_VERSION="0.3.2"
 # FLOO_POWDER_SELF_MARKER — `install` greps for this token to tell an on-disk copy of this script
 # (symlink it) from being run piped via `curl … | bash` (no file to link → self-fetch the pinned tag).
 FLOO_POWDER_URL="${FLOO_POWDER_URL:-https://raw.githubusercontent.com/interkelstar/floo/v$FLOO_VERSION/bin/floo-powder}"
@@ -182,6 +183,22 @@ cmd_invite() {
   print_oneliner "$host" "$port"
 }
 
+# Stand up / refresh the relay daemon on THIS box from the operator keys already in ~/.config/floo
+# (CA + relay HOST key — typically created by `init` or restored from backup). Reuses the host key,
+# so the pin is unchanged and existing clients still verify. Idempotent (install-relay.sh is). Does
+# NOT write relay.env (that's `init`'s first-time job) — a restored relay.env is left intact. This is
+# the clean primitive for: a bootstrap/restore that already has the keys, run without any repo folders.
+cmd_relay_install() {
+  [ -f "$RELAY_HOSTKEY" ] || die "no relay host key in $FLOO_HOME — run 'floo-powder init' (first-time) or restore your keys."
+  local installer="$SD/../relay/install-relay.sh" tmp=""
+  if [ ! -f "$installer" ]; then            # standalone/piped: no relay/ siblings → use the embedded copy
+    tmp="$(mktemp -d)"; materialize_relay "$tmp"; installer="$tmp/install-relay.sh"
+  fi
+  sudo "$installer" "$@" || { [ -n "$tmp" ] && rm -rf "$tmp"; die "relay install failed"; }
+  [ -n "$tmp" ] && rm -rf "$tmp"
+  echo "${G}✓ relay up${X}${RELAY_HOST:+ at $RELAY_HOST:$RELAY_PORT} — pin $(relay_pin 2>/dev/null || echo '?')"
+}
+
 cmd_init() {
   cmd_ca_init >/dev/null
   local host="${FLOO_RELAY_PUBLIC_HOST:-$(curl -fsS --max-time 5 ifconfig.me 2>/dev/null)}"
@@ -189,12 +206,7 @@ cmd_init() {
   [ -n "$host" ] || die "could not determine the relay's public host — set FLOO_RELAY_PUBLIC_HOST=<host>"
   if [ -z "${FLOO_INIT_NO_RELAY:-}" ]; then
     echo "standing up the relay on this box (sudo)…"
-    local installer="$SD/../relay/install-relay.sh" tmp=""
-    if [ ! -f "$installer" ]; then            # standalone/piped: no relay/ siblings → use the embedded copy
-      tmp="$(mktemp -d)"; materialize_relay "$tmp"; installer="$tmp/install-relay.sh"
-    fi
-    sudo "$installer" || { [ -n "$tmp" ] && rm -rf "$tmp"; die "relay install failed"; }
-    [ -n "$tmp" ] && rm -rf "$tmp"
+    cmd_relay_install
   fi
   # persist the public relay host so 'invite' and the operator CLI reuse it
   { grep -vE '^RELAY_(HOST|PORT)=' "$FLOO_HOME/relay.env" 2>/dev/null; echo "RELAY_HOST=$host"; echo "RELAY_PORT=$port"; } > "$FLOO_HOME/relay.env.tmp" && mv "$FLOO_HOME/relay.env.tmp" "$FLOO_HOME/relay.env"
@@ -668,8 +680,9 @@ case "${1:-}" in
   exec)    shift; cmd_exec "$@";;
   close)   shift; cmd_close "$@";;
   gc)      shift; cmd_gc "$@";;
+  relay-install) shift; cmd_relay_install "$@";;
   relay-extract) shift; materialize_relay "${1:?usage: floo-powder relay-extract <dir>}"; echo "extracted embedded relay payload (floo-route, floo-authkeys, install-relay.sh) → $1";;
   --version) echo "floo-powder $FLOO_VERSION — by Agents Deployed · https://agents-deployed.com";;
-  -h|--help|"") sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//';;
+  -h|--help|"") awk 'NR>=2 && /^#/{sub(/^# ?/,"");print} NR>=2 && !/^#/{exit}' "$0";;
   *) die "unknown command: $1";;
 esac

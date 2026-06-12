@@ -1,4 +1,12 @@
 # Changelog
+## 0.3.2 — 2026-06-12
+- `floo-powder relay-install`: stand up / refresh the relay daemon from the operator keys already in
+  `~/.config/floo` (CA + relay host key), reusing the host key so the pin is unchanged. Idempotent;
+  does NOT rewrite `relay.env` (unlike `init`). This is the clean primitive for a bootstrap/restore
+  that already has the keys — e.g. the agents-deployed operator-setup install script, or a
+  folder-free restore (`curl …/floo-powder -o … && floo-powder relay-install`). `init` now uses it.
+- help (`-h`) no longer leaks non-comment lines past the header.
+
 ## 0.3.1 — 2026-06-12
 - the embedded relay is now **readable**: floo-powder carries floo-route/floo-authkeys/install-relay.sh
   as verbatim bash (quoted heredocs), not base64. "Don't trust us — read us" now holds for the operator

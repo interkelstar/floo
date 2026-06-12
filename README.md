@@ -70,7 +70,7 @@ nothing else to clone and you can audit exactly what gets root. Fetch it, read i
 your relay:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/interkelstar/floo/v0.3.1/bin/floo-powder -o floo-powder
+curl -fsSL https://raw.githubusercontent.com/interkelstar/floo/v0.3.2/bin/floo-powder -o floo-powder
 less floo-powder                     # read it — incl. the embedded relay that `init` sudo-runs, inline + readable
 sh floo-powder install               # install into ~/.local/bin (self-fetches if piped)
 floo-powder init                     # turnkey: keys + stands up the embedded relay + prints the client one-liner
