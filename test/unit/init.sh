@@ -8,4 +8,11 @@ out=$(env HOME="$H" FLOO_HOME="$H/.config/floo" FLOO_INIT_NO_RELAY=1 FLOO_RELAY_
 grep -q 'curl -fsSL' <<<"$out" && grep -q 'relay.test.com' <<<"$out" && ok "prints client one-liner with the host" || bad "one-liner"
 grep -q '"operator_ca"' <<<"$out" && ok "prints importable config blob" || { bad "blob"; echo "$out" | tail -5; }
 env HOME="$H" "$OP" --version 2>/dev/null | grep -qE "floo-powder [0-9]+\.[0-9]+" && env HOME="$H" "$OP" --version 2>/dev/null | grep -qi agents-deployed && ok "--version" || bad "--version"
+
+# install-relay --allow-quick marker (static checks — the installer needs root, so we don't run it)
+INST="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)/relay/install-relay.sh"
+grep -q 'allow_quick' "$INST" && ok "install-relay references the allow_quick marker" || bad "no allow_quick handling"
+grep -q -- '--allow-quick' "$INST" && ok "install-relay accepts --allow-quick" || bad "no --allow-quick flag"
+grep -qE 'rm -f .*allow_quick' "$INST" && ok "uninstall removes the allow_quick marker" || bad "uninstall leaves allow_quick"
+
 rm -rf "$H"; echo "$P passed, $F failed"; [ "$F" -eq 0 ]

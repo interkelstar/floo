@@ -21,6 +21,11 @@ SOCKDIR="/run/floo"
 ETC="/etc/floo"
 SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
+# --allow-quick: opt into brokering no-cert (code-only) "quick" sessions. OFF by default — enabling it
+# turns the relay into an open rendezvous broker for code-only sessions, so it's a deliberate switch.
+ALLOW_QUICK=0
+for a in "$@"; do [ "$a" = "--allow-quick" ] && ALLOW_QUICK=1; done
+
 [ "$(id -u)" = 0 ] || { echo "run as root (sudo)"; exit 1; }
 
 # ── distro abstraction (Fedora/RHEL · Debian/Ubuntu · Arch · Alpine) ──────────────────────
@@ -63,6 +68,7 @@ uninstall() {
   # complete removal — leave ZERO leftovers, so a box can be wiped/moved cleanly. The only thing
   # deliberately NOT touched is ~/.config/floo (the operator's keys = durable access).
   systemctl disable --now floo-relay.service 2>/dev/null || true
+  rm -f "$ETC/allow_quick"
   rm -f /etc/systemd/system/floo-relay.service /etc/tmpfiles.d/floo.conf
   rm -f /usr/local/bin/floo-route /usr/local/bin/floo-authkeys
   rm -rf "$ETC" "$SOCKDIR"
@@ -99,6 +105,13 @@ systemd-tmpfiles --create /etc/tmpfiles.d/floo.conf
 
 echo "==> relay sshd config + dedicated host key (isolated from the box's primary sshd)"
 mkdir -p "$ETC"; chmod 755 "$ETC"; echo "$PORT" > "$ETC/port"
+# quick (no-CA) sessions are OFF unless explicitly enabled — the relay becomes an open rendezvous
+# broker for them, so it's an opt-in posture. The dispatcher checks for this marker file.
+if [ "$ALLOW_QUICK" = 1 ]; then
+  : > "$ETC/allow_quick"; echo "==> quick (no-cert) sessions ENABLED (--allow-quick) — relay will broker code-only sessions"
+else
+  rm -f "$ETC/allow_quick"; echo "==> quick (no-cert) sessions disabled (default; pass --allow-quick to enable)"
+fi
 # Use the operator's pre-generated relay host key (its PUBLIC half is pinned in floo as
 # FLOO_RELAY_HOSTKEY) so the deployed relay's identity matches what every client verifies — this
 # closes a relay-MITM. Resolve it from the invoking user's config; if absent, generate a fresh one
