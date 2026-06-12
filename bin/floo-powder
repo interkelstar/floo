@@ -72,9 +72,9 @@ cmd_ca_init() {
 cmd_list() {
   local out; out="$(relay_ssh list || true)"
   [ -n "$out" ] || { echo "no open support sessions."; return 0; }
-  printf '%s%-24s %-8s %s%s\n' "$B" "NAME" "SOCKET" "REGISTERED" "$X"
-  while IFS=$'\t' read -r bn sock reg; do
-    printf '%-24s %-8s %s\n' "$bn" "${sock#socket=}" "${reg#registered=}"
+  printf '%s%-20s %-8s %-18s %s%s\n' "$B" "LABEL" "SOCKET" "SID" "REGISTERED" "$X"
+  while IFS=$'\t' read -r sid sock label reg; do
+    printf '%-20s %-8s %-18s %s\n' "${label#label=}" "${sock#socket=}" "$sid" "${reg#registered=}"
   done <<<"$out"
 }
 
