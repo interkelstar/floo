@@ -99,11 +99,12 @@ cmd_connect() {
   # that code, so a wrong code (or a squatter's different code) simply resolves to nothing.
   local meta; meta="$(relay_ssh resolve "$(codehash "${code^^}")")" \
     || die "no live session for that code — wrong code, or they closed the window."
-  local sid loginuser label hostkey
+  local sid loginuser label hostkey quick
   sid="$(sed -n 's/^sid=//p' <<<"$meta")"
   loginuser="$(sed -n 's/^loginuser=//p' <<<"$meta")"
   label="$(sed -n 's/^label=//p' <<<"$meta")"
   hostkey="$(sed -n 's/^hostkey=//p' <<<"$meta" | awk '{print $1, $2}')"
+  quick="$(sed -n 's/^quick=//p' <<<"$meta")"
   { [ -n "$sid" ] && [ -n "$hostkey" ]; } || die "the relay returned an incomplete session record"
   loginuser="${loginuser:-$label}"
   echo "${G}✓ code matches — connected to the genuine session${X}"
@@ -117,25 +118,51 @@ cmd_connect() {
   printf '%s %s
 ' "$handle" "$hostkey" > "$sdir/known_hosts"          # pin the client host key under the alias
   ssh-keygen -t ed25519 -f "$sdir/opkey" -N '' -q -C "op-$sid"
-  ssh-keygen -s "$CA" -I "op-$sid-$(date -u +%Y%m%dT%H%M%SZ)" -n "$sid" -V +60m "$sdir/opkey.pub" >/dev/null
-  echo "${D}minted a 60-minute certificate (principal=$sid)${X}"
+  local certline="" waitline=""
+  if [ "$quick" = 1 ]; then
+    # NO-CERT (quick) mode: there is no CA. Bind an ephemeral key to the session with a code-proof —
+    # HMAC(code, opkey). Only the code-holder can forge it, so the client authorizes only this key.
+    command -v openssl >/dev/null 2>&1 || die "quick (no-cert) mode needs openssl for the code proof"
+    local opkpub authproof
+    opkpub="$(cat "$sdir/opkey.pub")"
+    authproof="$(printf '%s' "$opkpub" | openssl dgst -sha256 -hmac "${code^^}" | awk '{print $NF}')"
+    [ -n "$authproof" ] || die "could not compute the code proof"
+    relay_ssh bindop "$sid" "$authproof" "$opkpub" >/dev/null \
+      || die "the relay refused the operator bind — quick mode may be off on this relay, or too many binds."
+    echo "${D}no CA: bound an ephemeral key to the session by code-proof (HMAC) — TeamViewer-style${X}"
+    waitline=1   # the client authorizes our key after verifying the proof; wait for it below
+  else
+    ssh-keygen -s "$CA" -I "op-$sid-$(date -u +%Y%m%dT%H%M%SZ)" -n "$sid" -V +60m "$sdir/opkey.pub" >/dev/null
+    echo "${D}minted a 60-minute certificate (principal=$sid)${X}"
+    certline="    CertificateFile \"$sdir/opkey-cert.pub\""
+  fi
 
   cat > "$SSH_DROPIN_DIR/$handle.conf" <<CONF
-# floo-powder session $handle (sid $sid) — auto-managed, expires with the cert (≤60m). Safe to delete.
+# floo-powder session $handle (sid $sid) — auto-managed. Safe to delete.
 Host $handle
     HostName $handle
     HostKeyAlias $handle
     User $loginuser
     ProxyCommand ssh -p "$RELAY_PORT" -i "$RELAY_KEY" -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile="$FLOO_HOME/relay_known_hosts" "$RELAY_USER@$RELAY_HOST" route "$sid"
     IdentityFile "$sdir/opkey"
-    CertificateFile "$sdir/opkey-cert.pub"
+$certline
     IdentitiesOnly yes
     UserKnownHostsFile "$sdir/known_hosts"
     StrictHostKeyChecking yes
     RequestTTY auto
 CONF
   chmod 600 "$SSH_DROPIN_DIR/$handle.conf"
-  echo "${G}✓ session ready${X} — ${B}ssh $handle${X} / ${B}rsync … $handle:${X} / ${B}floo-powder exec $handle${X} (≤60 min)"
+
+  # quick mode: the client only authorizes our key once it polls getop + verifies the HMAC. Wait briefly
+  # so ssh/exec don't race the authorization (the CA path is usable the instant the cert is written).
+  if [ -n "$waitline" ]; then
+    local i
+    for i in $(seq 1 15); do
+      ssh -o BatchMode=yes -o ConnectTimeout=8 "$handle" true 2>/dev/null && break
+      sleep 1
+    done
+  fi
+  echo "${G}✓ session ready${X} — ${B}ssh $handle${X} / ${B}rsync … $handle:${X} / ${B}floo-powder exec $handle${X}"
   if [ "$shell" = 1 ]; then echo "${D}opening a shell… (they can watch via 'floo --watch')${X}"; exec ssh "$handle"; fi
 }
 
