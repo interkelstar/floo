@@ -120,8 +120,25 @@ env -i HOME="$OPHOME" PATH="$PATH" FLOO_HOME="$OPHOME/.config/floo" \
 OUT="$(env -i HOME="$OPHOME" PATH="$PATH" FLOO_HOME="$OPHOME/.config/floo" \
     FLOO_RELAY_HOST=127.0.0.1 FLOO_RELAY_PORT="$PORT" FLOO_RELAY_USER="$ME" \
     "$REPO/bin/floo-powder" exec qbox 2>"$WORK/exec.err" <<<'echo QMARK_$((6*7))' )"
-grep -q 'QMARK_42' <<<"$OUT" && ok "operator ran a command over the no-cert pivot (HMAC-bound key)" \
+grep -q 'QMARK_42' <<<"$OUT" && ok "BOT-operator (exec) ran a command over the no-cert pivot (HMAC-bound key)" \
   || { bad "exec over the quick pivot failed"; echo "$OUT"; cat "$WORK/exec.err"; tail -15 "$RUN"/floo/qbox/sshd.log 2>/dev/null; }
+
+# ── the BOT session must be RECORDED to the client's disk (logging, no-cert mode) ──
+sleep 0.3
+{ ls "$RUN"/floo/qbox/recording/*.log >/dev/null 2>&1 && grep -rq 'QMARK_42' "$RUN"/floo/qbox/recording/ 2>/dev/null; } \
+  && ok "BOT-operator session recorded on the client (cmd + output logged)" \
+  || { bad "BOT-operator session NOT recorded"; ls -la "$RUN"/floo/qbox/recording/ 2>/dev/null; }
+
+# ── MANUAL-operator mode: a real INTERACTIVE shell over a pty must work AND be recorded ──
+# (the exec path above is non-interactive; this drives an actual login shell via ssh -tt — the
+#  record-session wrapper's interactive branch, distinct from the command branch.)
+{ sleep 2.5; printf 'echo IMARK_$((6*7))\n'; sleep 1.5; printf 'exit\n'; sleep 0.5; } \
+  | timeout 25 env HOME="$OPHOME" PATH="$PATH" ssh -tt -o BatchMode=yes qbox >"$WORK/interactive.log" 2>&1 || true
+sleep 0.3
+grep -q 'IMARK_42' "$WORK/interactive.log" && ok "MANUAL-operator interactive shell ran (live output seen)" \
+  || { bad "interactive shell produced no output"; cat "$WORK/interactive.log"; }
+grep -rq 'IMARK_42' "$RUN"/floo/qbox/recording/ 2>/dev/null && ok "MANUAL-operator interactive session recorded on the client" \
+  || { bad "interactive session NOT recorded"; }
 
 # ── Ctrl-C still revokes ──
 note "delivering Ctrl-C to the public client…"
