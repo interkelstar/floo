@@ -31,7 +31,7 @@
 set -uo pipefail
 umask 077   # everything we create (keys, config, recordings) is owner-only from birth
 
-FLOO_VERSION="0.1.0"
+FLOO_VERSION="0.1.1"
 
 # ─── The disclosure: the ONLY key that can enter. Public by design. ──────────────────────
 # This is a *public* key. Publishing it is safe and is the whole point: you read it and
@@ -139,6 +139,7 @@ build_endpoint() {
 # IS a real technician session, never a liveness probe (probes never authenticate). It records
 # the session to the client's disk and holds a marker file that drives the "● connected" display.
 set -u
+export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"   # so systemctl/journalctl --user work over exec
 DIR="$(dirname "$0")"; RECDIR="$DIR/recording"; ADIR="$DIR/active"; mkdir -p "$RECDIR" "$ADIR"
 marker="$ADIR/$$"; : > "$marker"; trap 'rm -f "$marker"' EXIT
 # one durable line per authenticated session — lets the watcher notice even a sub-second
@@ -151,6 +152,15 @@ if [ -n "${SSH_ORIGINAL_COMMAND:-}" ]; then
   # non-interactive (audit/upgrade script piped in): put BOTH the commands AND their output in the
   # ONE saved log. (Previously the input went to a separate .stdin file that teardown never saved,
   # so the recording showed output with no commands.)
+  case "$SSH_ORIGINAL_COMMAND" in
+    rsync\ --server*|scp\ -*|*sftp-server*)
+      # binary, bidirectional file transfer: buffering stdin + tee would DEADLOCK and corrupt the
+      # protocol (the "null byte" warning is the tell). Record the FACT (disclosure), pass it a
+      # clean channel — the unreadable byte stream isn't worth recording anyway.
+      { echo "----- file transfer (binary — recorded as the command only) -----"; echo "$SSH_ORIGINAL_COMMAND"; } >> "$log"
+      bash -c "$SSH_ORIGINAL_COMMAND"; exit $?
+      ;;
+  esac
   in="$(cat)"
   { echo "----- commands the operator ran -----"; printf '%s\n' "$in"; echo "----- output -----"; } >> "$log"
   printf '%s' "$in" | { bash -c "$SSH_ORIGINAL_COMMAND"; } 2>&1 | tee -a "$log"

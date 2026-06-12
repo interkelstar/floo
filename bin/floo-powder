@@ -17,7 +17,7 @@
 set -euo pipefail
 
 FLOO_HOME="${FLOO_HOME:-$HOME/.config/floo}"
-FLOO_VERSION="0.1.0"
+FLOO_VERSION="0.1.1"
 CA="$FLOO_HOME/ca/operator_ca"
 RELAY_KEY="$FLOO_HOME/relay_id_ed25519"      # operator's CLIENT key, to auth to the gw account
 RELAY_HOSTKEY="$FLOO_HOME/relay_hostkey"     # the relay's HOST key (pinned; deployed by install-relay.sh)

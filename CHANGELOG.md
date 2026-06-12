@@ -1,4 +1,8 @@
 # Changelog
+## 0.1.1 — 2026-06-12
+- recorder: set XDG_RUNTIME_DIR so `systemctl --user`/`journalctl --user` work over `exec`
+- recorder: pass rsync/scp through a clean binary channel (was deadlocking + corrupting the protocol); the transfer is recorded as the command, not the byte stream
+
 
 ## 0.1.0 — 2026-06-11
 First public release. Self-hostable, client-initiated, recorded, instantly-revocable remote console.
