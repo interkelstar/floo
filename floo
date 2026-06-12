@@ -50,6 +50,7 @@ FLOO_RELAY_HOST="${FLOO_RELAY_HOST:-}"
 FLOO_RELAY_PORT="${FLOO_RELAY_PORT:-443}"      # 443 so it survives restrictive outbound firewalls
 FLOO_RELAY_USER="${FLOO_RELAY_USER:-gw}"       # a powerless, forwarding-only account on the relay
 FLOO_RELAY_SOCK_DIR="${FLOO_RELAY_SOCK_DIR:-/run/floo}"   # path namespace ON the relay
+FLOO_RELAY_PIN="${FLOO_RELAY_PIN:-}"            # short relay-hostkey fingerprint (pin-bootstrap)
 
 # ─── Cosmetic ────────────────────────────────────────────────────────────────────────────
 if [ -t 1 ]; then B=$'\e[1m'; D=$'\e[2m'; G=$'\e[32m'; Y=$'\e[33m'; R=$'\e[31m'; X=$'\e[0m'
@@ -589,6 +590,32 @@ cmd_install() {
   mkdir -p "$dst"; install -m755 "$0" "$dst/floo" && echo "installed floo to $dst/floo — ensure $dst is on PATH"
 }
 
+# ── pin-bootstrap: learn the operator's keys from the relay instead of pasting them ──────────
+# Given a short relay fingerprint (--pin), verify the relay's host key matches it, then fetch the
+# operator's PUBLIC CA over that verified connection. Restores the short, paste-safe one-liner
+# while keeping the trust anchor (the out-of-band pin) honest.
+bootstrap_from_relay() {
+  local tmp scanned blob got
+  scanned="$(ssh-keyscan -t ed25519 -p "$FLOO_RELAY_PORT" "$FLOO_RELAY_HOST" 2>/dev/null)"
+  blob="$(awk '{for(i=1;i<=NF;i++) if($i=="ssh-ed25519"){print $(i+1); exit}}' <<<"$scanned")"
+  [ -n "$blob" ] || { warn "could not reach the relay at $FLOO_RELAY_HOST:$FLOO_RELAY_PORT to verify the pin."; exit 1; }
+  got="$(printf '%s' "$blob" | base64 -d 2>/dev/null | sha256sum | cut -c1-16)"
+  if [ "$got" != "$FLOO_RELAY_PIN" ]; then
+    warn "relay fingerprint ($got) does NOT match your pin ($FLOO_RELAY_PIN) — possible MITM or wrong code. Refusing."; exit 1
+  fi
+  FLOO_RELAY_HOSTKEY="ssh-ed25519 $blob"   # pin verified → trust this relay host key for the session
+  tmp="$(mktemp -d "${TMPDIR:-/tmp}/floo-bs.XXXXXX")"
+  local rt; if [ "$FLOO_RELAY_PORT" = 22 ]; then rt="$FLOO_RELAY_HOST"; else rt="[$FLOO_RELAY_HOST]:$FLOO_RELAY_PORT"; fi
+  printf '%s %s\n' "$rt" "$FLOO_RELAY_HOSTKEY" > "$tmp/kh"
+  ssh-keygen -t ed25519 -f "$tmp/k" -N '' -q -C floo-bootstrap
+  FLOO_OPERATOR_CA="$(ssh -p "$FLOO_RELAY_PORT" -i "$tmp/k" -o IdentitiesOnly=yes -o BatchMode=yes \
+      -o ConnectTimeout=12 -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$tmp/kh" \
+      "${FLOO_RELAY_USER}@${FLOO_RELAY_HOST}" opconfig 2>/dev/null)"
+  rm -rf "$tmp"
+  [ -n "$FLOO_OPERATOR_CA" ] || { warn "the relay didn't return an operator CA (has the operator published one?)."; exit 1; }
+  ok "relay verified (pin matches); operator key fetched — nothing to paste."
+}
+
 main() {
   case "${1:-}" in
     -h|--help) usage; exit 0;;
@@ -602,6 +629,7 @@ main() {
     --operator-ca) FLOO_OPERATOR_CA="$2"; shift 2;;
     --relay-hostkey) FLOO_RELAY_HOSTKEY="$2"; shift 2;;
     --operator) operator="$2"; shift 2;;
+    --pin) FLOO_RELAY_PIN="$2"; shift 2;;
     --name) FLOO_NAME="$2"; shift 2;;
     --watch) mode=watch; shift;;
     --status) mode=status; shift;;
@@ -612,6 +640,7 @@ main() {
   NAME="$(resolve_name)"
   [ "$mode" = printname ] && { printf '%s\n' "$NAME"; exit 0; }
   if [ -z "$FLOO_RELAY_HOST" ] || [ -z "$FLOO_OPERATOR_CA" ]; then load_operator "$operator" || true; fi
+  if [ -n "$FLOO_RELAY_PIN" ] && [ -z "$FLOO_OPERATOR_CA" ] && [ -n "$FLOO_RELAY_HOST" ]; then bootstrap_from_relay; fi
   # paste-safety: a terminal can fold a long --operator-ca/--relay-hostkey onto multiple lines
   # (newline+indent), which corrupts the key. Collapse inserted whitespace back to "type blob comment".
   FLOO_OPERATOR_CA="$(printf '%s' "$FLOO_OPERATOR_CA" | tr '\n\r\t' '   ' | tr -s ' ' | sed 's/^ *//;s/ *$//')"

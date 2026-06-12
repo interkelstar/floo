@@ -116,6 +116,14 @@ if [ ! -f "$ETC/relay_hostkey" ]; then
   fi
 fi
 chmod 600 "$ETC/relay_hostkey"
+# publish the operator's PUBLIC CA so pin-bootstrapped clients can fetch it via the relay's 'opconfig'
+CA_SRC="${FLOO_OPERATOR_CA_SRC:-}"
+[ -z "$CA_SRC" ] && [ -n "${SUDO_USER:-}" ] && CA_SRC="$(getent passwd "$SUDO_USER" | cut -d: -f6)/.config/floo/ca/operator_ca.pub"
+if [ -n "$CA_SRC" ] && [ -f "$CA_SRC" ]; then
+  install -m644 "$CA_SRC" "$ETC/operator_ca.pub"; echo "   published operator CA for pin-bootstrap (opconfig)"
+else
+  echo "   ! operator CA not found ($CA_SRC) — pin-bootstrap clients can't fetch it; set FLOO_OPERATOR_CA_SRC"
+fi
 cat > "$ETC/relay_sshd_config" <<CFG
 # floo relay — isolated sshd instance. ONLY the gw account, ONLY forwarding.
 Port $PORT

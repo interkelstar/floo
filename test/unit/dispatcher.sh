@@ -46,6 +46,13 @@ route deregister testbot >/dev/null 2>&1
 
 route somethingelse >/dev/null 2>&1 && bad "unknown command succeeded" || ok "rejects an unknown command"
 
+
+# opconfig serves the operator PUBLIC CA (pin-bootstrap)
+CAF=$(mktemp); echo "ssh-ed25519 AAAATESTCA opca" > "$CAF"
+[ "$(FLOO_OPERATOR_CA_FILE="$CAF" route opconfig 2>/dev/null)" = "ssh-ed25519 AAAATESTCA opca" ] && ok "opconfig serves the operator CA" || bad "opconfig did not serve the CA"
+FLOO_OPERATOR_CA_FILE=/nonexistent route opconfig >/dev/null 2>&1 && bad "opconfig served with no CA published" || ok "opconfig denies when no CA is published"
+rm -f "$CAF"
+
 echo "=== authkeys ==="
 o="$(bash "$AUTHKEYS" ssh-ed25519 AAAAKEYBLOB)"
 [ "$o" = "ssh-ed25519 AAAAKEYBLOB" ] && ok "authkeys echoes a valid key (accept-any)" || bad "authkeys output wrong: '$o'"

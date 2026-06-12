@@ -14,9 +14,11 @@
 #   route <botname>                                      operator pivot: connect to the client socket
 #   deregister <botname>                                 client teardown removes its socket + meta
 #   list                                                 enumerate sessions (dead ones GC'd)
+#   opconfig                                             serve the operator PUBLIC CA (pin-bootstrap)
 set -u
 
 SOCKDIR="${FLOO_RELAY_SOCK_DIR:-/run/floo}"
+CA_FILE="${FLOO_OPERATOR_CA_FILE:-/etc/floo/operator_ca.pub}"
 
 log() { logger -t floo-route -- "$*" 2>/dev/null || true; }
 valid_botname() { [[ "$1" =~ ^[a-z0-9][a-z0-9-]{0,62}$ ]]; }   # DNS label → can't escape SOCKDIR
@@ -107,6 +109,12 @@ case "$cmd" in
       reg="$(sed -n 's/^registered=//p' "$m")"
       printf '%s\tsocket=%s\tregistered=%s\n' "$b" "$live" "$reg"
     done
+    ;;
+
+  opconfig)
+    # serve the operator's PUBLIC CA so a pin-bootstrapped client can fetch it over the
+    # host-key-verified relay connection instead of pasting it on the command line. Public only.
+    [ -f "$CA_FILE" ] && cat "$CA_FILE" || deny "no operator CA published on this relay"
     ;;
 
   *)
