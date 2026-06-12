@@ -24,12 +24,18 @@ their box changed. Nothing is installed, nothing runs as root, nothing survives 
 
 ## For the client
 
-Only when you want help. Either run it ad-hoc:
+Only when you want help. Whoever's helping you hands you a one-line command — paste it, and read them
+the pairing code it prints:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/interkelstar/floo/<commit>/floo \
-  | bash -s -- --relay relay.example.com --operator-ca 'ssh-ed25519 AAAA… op'
+curl -fsSL https://raw.githubusercontent.com/interkelstar/floo/v0.1.0/floo \
+  | bash -s -- --relay relay.example.com --pin 0123456789abcdef
 ```
+
+The `--pin` is a short fingerprint of the operator's relay. `floo` verifies the relay against it, then
+fetches the operator's key *from* the relay — so there are no long keys to paste (and nothing for a
+terminal to fold and corrupt). The URL is a version tag, so you run exactly the code you can read at
+`github.com/interkelstar/floo/tree/v0.1.0`.
 
 …or, if you'll get support more than once, **install it and save your operator once**:
 
@@ -61,8 +67,9 @@ is that it runs as *your* user, is recorded, and any change to your access surfa
 ```sh
 git clone https://github.com/interkelstar/floo && cd floo
 bin/floo-powder install                  # symlink floo-powder (+ floo) into ~/.local/bin — then drop the bin/ prefix
-floo-powder init                         # turnkey: keys + relay + prints the client one-liner & config blob
+floo-powder init                         # turnkey: keys + relay + prints the client one-liner
 
+floo-powder invite                   # reprint the one-liner to hand to whoever you're helping
 floo-powder list                     # clients with an open session
 floo-powder connect <name>           # type the code the CLIENT reads you, get a shell
 floo-powder exec <name> < audit.sh   # run a script non-interactively (recorded on the client)
