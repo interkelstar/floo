@@ -57,6 +57,49 @@ CAF=$(mktemp); echo "ssh-ed25519 AAAATESTCA opca" > "$CAF"
 FLOO_OPERATOR_CA_FILE=/nonexistent route opconfig >/dev/null 2>&1 && bad "opconfig served with no CA published" || ok "opconfig denies when no CA is published"
 rm -f "$CAF"
 
+echo "=== quick mode (bindop/getop, allow-quick gate, caps) ==="
+QSID="b1c2d3e4f5061728"
+QCODE="ABCD-EF01-2345-6"; QCH="$(printf '%s' "$QCODE" | sha256sum | cut -c1-64)"
+OPKEY="ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAopkeyblob op-test"
+AUTH="$(printf '%s' "$OPKEY" | openssl dgst -sha256 -hmac "$QCODE" | awk '{print $NF}')"
+ALLOWQ="$(mktemp)"   # presence = quick enabled
+qroute(){ SSH_ORIGINAL_COMMAND="$*" SSH_CONNECTION="1.2.3.4 5 6 7" FLOO_ALLOW_QUICK_FILE="$ALLOWQ" bash "$ROUTE"; }
+
+# register is REFUSED for quick=1 when the allow-quick marker is absent (no socket yet — the real client
+# registers BEFORE its tunnel creates the socket, so register must run with no live socket).
+SSH_ORIGINAL_COMMAND="register $QSID $QCH kelstar qbox quick=1 $OPKEY" SSH_CONNECTION="1.2.3.4 5 6 7" \
+  FLOO_ALLOW_QUICK_FILE=/nonexistent bash "$ROUTE" >/dev/null 2>&1 \
+  && bad "quick register accepted with allow-quick OFF" || ok "quick register refused when allow-quick is off"
+
+# with the marker present, quick register succeeds and records quick=1
+qroute register "$QSID" "$QCH" kelstar qbox quick=1 $OPKEY >/dev/null 2>&1 \
+  && grep -q '^quick=1' "$SOCK/$QSID.meta" && ok "quick register writes quick=1 meta" || bad "quick register failed"
+
+# NOW bring the session's socket live (mirrors the client's reverse tunnel), so bindop's liveness check passes
+QL=""; nc -lkU "$SOCK/$QSID.sock" >/dev/null 2>&1 & QL=$!; sleep 0.4
+
+# bindop appends a bind; getop returns it
+qroute bindop "$QSID" "$AUTH" $OPKEY >/dev/null 2>&1 && ok "bindop accepted a well-formed bind" || bad "bindop rejected a valid bind"
+grep -q "$AUTH" <<<"$(qroute getop "$QSID" 2>/dev/null)" && ok "getop returns the stored bind" || bad "getop did not return the bind"
+
+# store-all: a second (griefer, junk-auth) bind is also stored, and getop returns BOTH
+GARBAGE="$(printf '%064d' 0 | tr 0 d)"   # 64 hex chars, wrong auth
+qroute bindop "$QSID" "$GARBAGE" "ssh-ed25519 AAAAgrieferblob grief" >/dev/null 2>&1
+[ "$(qroute getop "$QSID" 2>/dev/null | wc -l)" -ge 2 ] && ok "store-all keeps multiple binds (client filters)" || bad "second bind not stored"
+
+# bindop is refused for a non-quick session (the CA session registered earlier has no quick=1)
+qroute bindop "$SID" "$AUTH" $OPKEY >/dev/null 2>&1 && bad "bindop accepted on a non-quick session" || ok "bindop refuses a non-quick session"
+# bindop validates the auth hex
+qroute bindop "$QSID" NOTHEX $OPKEY >/dev/null 2>&1 && bad "bindop accepted a non-hex auth" || ok "bindop rejects a malformed auth"
+# getop on a session with no binds denies
+qroute getop "$SID" >/dev/null 2>&1 && bad "getop returned binds for a session with none" || ok "getop denies when nothing is bound"
+# bindop refused when allow-quick is OFF even for a quick session
+SSH_ORIGINAL_COMMAND="bindop $QSID $AUTH $OPKEY" SSH_CONNECTION="1.2.3.4 5 6 7" \
+  FLOO_ALLOW_QUICK_FILE=/nonexistent bash "$ROUTE" >/dev/null 2>&1 \
+  && bad "bindop accepted with allow-quick OFF" || ok "bindop refused when allow-quick is off"
+
+kill "$QL" 2>/dev/null; rm -f "$SOCK/$QSID.sock" "$SOCK/$QSID.binds" "$SOCK/$QSID.meta" "$ALLOWQ"
+
 echo "=== authkeys ==="
 o="$(bash "$AUTHKEYS" ssh-ed25519 AAAAKEYBLOB)"
 [ "$o" = "ssh-ed25519 AAAAKEYBLOB" ] && ok "authkeys echoes a valid key (accept-any)" || bad "authkeys output wrong: '$o'"

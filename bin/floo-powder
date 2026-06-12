@@ -288,6 +288,12 @@ set -u
 
 SOCKDIR="${FLOO_RELAY_SOCK_DIR:-/run/floo}"
 CA_FILE="${FLOO_OPERATOR_CA_FILE:-/etc/floo/operator_ca.pub}"
+ALLOW_QUICK_FILE="${FLOO_ALLOW_QUICK_FILE:-/etc/floo/allow_quick}"   # marker written by install-relay.sh --allow-quick
+QUICK_MAX="${FLOO_QUICK_MAX:-20}"        # cap on concurrent quick sessions
+QUICK_TTL="${FLOO_QUICK_TTL:-1800}"      # quick session lifetime (seconds) before it's pruned
+MAX_BINDS="${FLOO_QUICK_MAXBINDS:-64}"   # cap on stored operator binds per quick session (anti disk-fill)
+allow_quick() { [ -f "$ALLOW_QUICK_FILE" ]; }
+valid_authhex() { [[ "$1" =~ ^[a-f0-9]{64}$ ]]; }
 
 log() { logger -t floo-route -- "$*" 2>/dev/null || true; }
 valid_sid()      { [[ "$1" =~ ^[a-f0-9]{16}$ ]]; }                 # random routing id → can't escape SOCKDIR
@@ -311,7 +317,29 @@ socket_live() {
   esac
 }
 # unlink stale socket + its meta (self-heals after a power loss / SIGKILL where deregister never ran)
-gc_dead() { local s="$1"; [ -e "$SOCKDIR/$s.sock" ] && ! socket_live "$SOCKDIR/$s.sock" && rm -f "$SOCKDIR/$s.sock" "$SOCKDIR/$s.meta"; return 0; }
+gc_dead() { local s="$1"; [ -e "$SOCKDIR/$s.sock" ] && ! socket_live "$SOCKDIR/$s.sock" && rm -f "$SOCKDIR/$s.sock" "$SOCKDIR/$s.meta" "$SOCKDIR/$s.binds"; return 0; }
+
+# count quick sessions whose socket is live (the concurrency cap is on ACTIVE sessions)
+count_quick_live() {
+  local n=0 m s; shopt -s nullglob
+  for m in "$SOCKDIR"/*.meta; do
+    [ "$(sed -n 's/^quick=//p' "$m")" = 1 ] || continue
+    s="$(sed -n 's/^sid=//p' "$m")"
+    socket_live "$SOCKDIR/$s.sock" && n=$((n+1))
+  done
+  echo "$n"
+}
+# reap quick sessions older than the TTL (CA sessions are untouched — no quick=1/registered_epoch)
+prune_quick_expired() {
+  local now m e s; now="$(date +%s)"; shopt -s nullglob
+  for m in "$SOCKDIR"/*.meta; do
+    [ "$(sed -n 's/^quick=//p' "$m")" = 1 ] || continue
+    e="$(sed -n 's/^registered_epoch=//p' "$m")"; [ -n "$e" ] || continue
+    if [ $((now - e)) -gt "$QUICK_TTL" ]; then
+      s="$(sed -n 's/^sid=//p' "$m")"; rm -f "$SOCKDIR/$s.sock" "$SOCKDIR/$s.meta" "$SOCKDIR/$s.binds"
+    fi
+  done
+}
 
 read -ra A <<<"${SSH_ORIGINAL_COMMAND:-}"
 cmd="${A[0]:-}"
@@ -322,8 +350,21 @@ case "$cmd" in
     ch="${A[2]:-}";        valid_codehash "$ch"       || deny "bad code hash"
     loginuser="${A[3]:-}"; [[ "$loginuser" =~ ^[a-z_][a-z0-9_-]{0,31}$ ]] || deny "bad login user"
     label="${A[4]:-}";     valid_label "$label"       || deny "bad label"
-    hostpub="${A[*]:5}";   [ -n "$hostpub" ]          || deny "missing host key"
+    # optional quick flag at position 5 (literal "quick=0|1"); else the host key starts at 5 (back-compat
+    # with v0.2 clients that send no flag — their A[5] is "ssh-ed25519 …", which is NOT "quick=*").
+    quick=0
+    if [[ "${A[5]:-}" == quick=* ]]; then
+      quick="${A[5]#quick=}"; [[ "$quick" =~ ^[01]$ ]] || deny "bad quick flag"; hostpub="${A[*]:6}"
+    else
+      hostpub="${A[*]:5}"
+    fi
+    [ -n "$hostpub" ] || deny "missing host key"
     case "$hostpub" in ssh-ed25519\ *|ssh-rsa\ *|ecdsa-*\ *) ;; *) deny "bad host key" ;; esac
+    if [ "$quick" = 1 ]; then
+      allow_quick || deny "quick mode not enabled on this relay"
+      prune_quick_expired
+      [ "$(count_quick_live)" -lt "$QUICK_MAX" ] || deny "too many active quick sessions; try again shortly"
+    fi
     umask 077; mkdir -p "$SOCKDIR" 2>/dev/null   # metas are 0600 — code hashes not world-readable
     gc_dead "$sid"
     socket_live "$SOCKDIR/$sid.sock" && deny "a live session already exists for that id"
@@ -332,7 +373,9 @@ case "$cmd" in
       echo "code=$ch"
       echo "loginuser=$loginuser"
       echo "label=$label"
+      echo "quick=$quick"
       echo "registered=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+      echo "registered_epoch=$(date +%s)"
       echo "peer=${SSH_CONNECTION%% *}"
       echo "hostkey=$hostpub"
     } > "$SOCKDIR/$sid.meta.tmp" && mv "$SOCKDIR/$sid.meta.tmp" "$SOCKDIR/$sid.meta"
@@ -344,13 +387,14 @@ case "$cmd" in
     # code -> sid. Linear-scan live metas for a matching code hash; this IS the verification
     # (only the genuine client registered that hash). Never echoes the code hash itself.
     ch="${A[1]:-}"; valid_codehash "$ch" || deny "bad code hash"
+    prune_quick_expired
     shopt -s nullglob
     for m in "$SOCKDIR"/*.meta; do
       [ "$(sed -n 's/^code=//p' "$m")" = "$ch" ] || continue
       sid="$(sed -n 's/^sid=//p' "$m")"
       socket_live "$SOCKDIR/$sid.sock" || { gc_dead "$sid"; continue; }
       echo "socket=live"
-      grep -vE '^(code|sid)=' "$m"   # loginuser, label, registered, peer, hostkey
+      grep -vE '^(code|sid|registered_epoch)=' "$m"   # loginuser, label, quick, registered, peer, hostkey
       echo "sid=$sid"
       exit 0
     done
@@ -361,7 +405,7 @@ case "$cmd" in
     sid="${A[1]:-}"; valid_sid "$sid" || deny "bad sid"
     [ -f "$SOCKDIR/$sid.meta" ] || deny "no such session"
     if socket_live "$SOCKDIR/$sid.sock"; then echo "socket=live"; else echo "socket=absent"; fi
-    grep -v '^code=' "$SOCKDIR/$sid.meta"
+    grep -vE '^(code|registered_epoch)=' "$SOCKDIR/$sid.meta"
     ;;
 
   route)
@@ -371,14 +415,39 @@ case "$cmd" in
     exec nc -U "$SOCKDIR/$sid.sock"
     ;;
 
+  bindop)
+    sid="${A[1]:-}";  valid_sid "$sid"      || deny "bad sid"
+    auth="${A[2]:-}"; valid_authhex "$auth" || deny "bad auth"
+    opkey="${A[*]:3}"; [ -n "$opkey" ]      || deny "missing operator key"
+    case "$opkey" in ssh-ed25519\ *|ssh-rsa\ *|ecdsa-*\ *) ;; *) deny "bad operator key" ;; esac
+    [ -f "$SOCKDIR/$sid.meta" ] || deny "no such session"
+    [ "$(sed -n 's/^quick=//p' "$SOCKDIR/$sid.meta")" = 1 ] || deny "not a quick session"
+    allow_quick || deny "quick mode not enabled on this relay"
+    socket_live "$SOCKDIR/$sid.sock" || { gc_dead "$sid"; deny "no live socket"; }
+    # STORE-ALL (not first-write-wins): a junk bind can't squat the slot; the code-holder's bind is
+    # found by the client among the inert ones. Cap the list to bound disk use.
+    n="$( [ -f "$SOCKDIR/$sid.binds" ] && wc -l < "$SOCKDIR/$sid.binds" || echo 0 )"
+    [ "$n" -lt "$MAX_BINDS" ] || deny "too many bind attempts for that session"
+    umask 077; printf '%s %s\n' "$auth" "$opkey" >> "$SOCKDIR/$sid.binds"
+    log "bindop $sid"
+    echo "bound $sid"
+    ;;
+
+  getop)
+    sid="${A[1]:-}"; valid_sid "$sid" || deny "bad sid"
+    [ -f "$SOCKDIR/$sid.binds" ] || deny "no operator bound yet"
+    cat "$SOCKDIR/$sid.binds"
+    ;;
+
   deregister)
     sid="${A[1]:-}"; valid_sid "$sid" || deny "bad sid"
-    rm -f "$SOCKDIR/$sid.sock" "$SOCKDIR/$sid.meta"
+    rm -f "$SOCKDIR/$sid.sock" "$SOCKDIR/$sid.meta" "$SOCKDIR/$sid.binds"
     log "deregister $sid"
     echo "deregistered $sid"
     ;;
 
   list)
+    prune_quick_expired
     shopt -s nullglob
     for m in "$SOCKDIR"/*.meta; do
       sid="$(sed -n 's/^sid=//p' "$m")"
