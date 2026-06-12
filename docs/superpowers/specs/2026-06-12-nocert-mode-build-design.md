@@ -49,17 +49,25 @@ automatically.
   existing env mechanism). Absent → relay **refuses** `register quick=1` and `bindop`/`getop` with a clean
   "quick mode not enabled on this relay" error. The CA path is untouched in either case.
 - New verbs:
-  - `bindop <sid> <opkey> <auth>` — operator registers its ephemeral pubkey + code-proof. **First write wins**:
-    refuse if a binding already exists for the sid. Validate `opkey` as a single ssh pubkey line; validate
-    `auth` as hex. Stored in session meta (or `<sid>.bind`).
-  - `getop <sid>` — returns `opkey auth` for the client to verify + bind. Public data, useless without the code.
+  - `bindop <sid> <auth> <opkey…>` — operator publishes its ephemeral pubkey + code-proof. **Store-all, not
+    first-write-wins**: append `auth opkey` to `<sid>.binds` (capped at 64 lines, `FLOO_QUICK_MAXBINDS`, to
+    bound disk use). Validate `auth` as 64-hex and `opkey` as an ssh pubkey. Gated on `allow_quick` + the
+    session being `quick=1` + a live socket. Rationale: `list` exposes SIDs to anyone who can reach the relay,
+    so a first-write-wins single slot is trivially squattable with a junk `auth`; storing all binds lets the
+    client skip the inert (non-verifying) ones and still find the legit operator's bind whenever it lands.
+  - `getop <sid>` — returns all stored bind lines (`auth opkey`). Public data, useless without the code (a bind
+    only authorizes if `HMAC(code,opkey)==auth`, and only the code-holder can produce that).
 - `register` gains an optional `quick=1` marker; `resolve` returns the quick flag in its meta so the operator
   branches correctly.
 - **Caps (active only under `--allow-quick`):**
-  - max concurrent quick sessions: **20**
-  - per-IP `register` + `bindop` rate-limit: **10 / minute**
-  - quick session TTL: **30 minutes** (distinct from CA TTL; expired sessions reaped)
-  - reuses the existing `gc_dead` cleanup; extends the existing fail2ban/MaxStartups posture for the rate-limit.
+  - max concurrent quick sessions: **20** (`FLOO_QUICK_MAX`) — new dispatcher cap.
+  - quick session TTL: **30 minutes** (`FLOO_QUICK_TTL`, seconds) — new dispatcher cap; a quick session whose
+    `registered=` is older than the TTL is pruned on the next `register`/`resolve`/`list` scan (alongside the
+    existing `gc_dead` socket-liveness cleanup).
+  - per-IP `register`/`bindop` rate-limit: **provided by the existing connection-layer controls**, not a new
+    app-layer limiter. Every `register`/`bindop` is a fresh `gw` SSH handshake, so the relay sshd's
+    `PerSourceMaxStartups=4` + `MaxAuthTries=3` + the fail2ban jail (all already in `install-relay.sh`) already
+    throttle exactly this — a redundant timing-fragile bash limiter is deliberately avoided.
 
 ### Client — `floo --public`
 
@@ -69,7 +77,8 @@ automatically.
 - Throwaway sshd in no-cert mode: **no `TrustedUserCAKeys`**; `AuthorizedKeysFile $WORKDIR/authorized_keys`
   starting **empty**; `PubkeyAuthentication yes`, `AuthenticationMethods publickey`, all other hardening
   unchanged (`PermitRootLogin no` → client must run non-root, as today).
-- After registering, **poll `getop <sid>`**; on a binding, verify `HMAC(code, opkey)==auth`; if good, write
+- After registering, **poll `getop <sid>`**; for each returned bind verify `HMAC(code, opkey)==auth`; on the
+  first that verifies (skipping inert griefer binds), write
   `opkey` to `authorized_keys` **atomically** and stop polling. sshd reads `authorized_keys` per-connection →
   no reload. From then only that one operator key is accepted.
 - Recording, before/after state-diff, `--watch`, Ctrl-C = full revoke / zero standing footprint: **unchanged**.
@@ -81,15 +90,21 @@ automatically.
 
 - `resolve sha256(code)` → sid **+ quick flag** (+ label/loginuser/hostkey, as today).
 - **quick=1:** generate ephemeral `OPK` (`ssh-keygen -t ed25519`), compute
-  `auth = printf '%s' "$OPKPUB" | openssl dgst -sha256 -hmac "$code" | awk '{print $NF}'`, `bindop sid OPK.pub
-  auth`, then `ssh` with `IdentityFile=OPK`, **no `CertificateFile`**, via `route sid`.
+  `auth = printf '%s' "$OPKPUB" | openssl dgst -sha256 -hmac "$NORMCODE" | awk '{print $NF}'` (where `NORMCODE`
+  is the uppercased code), `bindop <sid> <auth> <OPK.pub>`, write an ssh drop-in with `IdentityFile=OPK` and
+  **no `CertificateFile`** (route via `route sid`), then **wait in a short retry loop** for the client to
+  authorize the key (it polls `getop`, verifies the HMAC, writes `authorized_keys`) before opening the shell.
 - **quick=0:** today's CA-cert path, unchanged.
 - Pin the client host key from the resolve meta (unchanged). You paste a code; powder picks the path.
 
 ## Code format
 
-- **No-cert:** a **6-word sequence** from a bundled wordlist (~66 bits) — chosen for "read it over the phone"
-  ergonomics over base32. Generator lives client-side.
+- **No-cert:** **13 base32 chars (~65 bits)**, grouped `XXXX-XXXX-XXXX-X`, from `/dev/urandom`. Chosen over a
+  word-sequence because a ≥64-bit word code needs a ~1700-word list embedded in the client (+~12–15KB, ~40%
+  larger) — which undercuts floo's "one readable Bash file" value. base32 needs zero embedded data, stays
+  auditable, and reads fine over the phone in 4-char groups. Generator lives client-side.
+- **Code normalization:** both ends uppercase the code before *both* `sha256` (resolve) and `HMAC` (bind proof),
+  so casing never desyncs. base32 is already uppercase, so this is effectively a no-op but is applied uniformly.
 - **CA:** unchanged `XXXX-XXXX` (32-bit).
 - Format is the generator contract only; the **relay flag** still decides operator behavior.
 
@@ -104,7 +119,8 @@ automatically.
 
 ## Testing
 
-- **Dispatcher unit:** `bindop` first-write-wins (second bind refused); `getop` returns the binding;
+- **Dispatcher unit:** `bindop` appends + is gated (refused when `allow_quick` off / session not quick / over
+  the bind cap); `getop` returns all binds; a client picks the first verifying bind and skips an inert one;
   `register quick=1` refused when `FLOO_ALLOW_QUICK` is unset, accepted when set; `resolve` surfaces the flag.
 - **Loopback quick:** client registers quick → operator binds with a valid code-proof → client verifies +
   writes `authorized_keys` → operator connects with the ephemeral key. A **wrong-code** proof is rejected (HMAC
@@ -113,8 +129,8 @@ automatically.
   agents-deployed box grants a one-off via `floo --public` to an operator with no CA.
 - **Adversarial:** a relay that knows only `sha256(code)` + `HMAC(code,opkey)` cannot connect (no ephemeral
   private key, can't forge `auth` without the code).
-- **Caps:** registering past max-concurrent is refused; per-IP rate-limit trips; a quick session past TTL is
-  reaped.
+- **Caps:** registering past max-concurrent is refused; a quick session past TTL is reaped on the next scan.
+  (Per-IP throttling is exercised by the existing sshd/fail2ban posture, not a new dispatcher test.)
 
 ## Versioning
 
