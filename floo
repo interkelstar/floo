@@ -31,7 +31,7 @@
 set -uo pipefail
 umask 077   # everything we create (keys, config, recordings) is owner-only from birth
 
-FLOO_VERSION="0.4.0"
+FLOO_VERSION="0.5.0"
 
 # ─── The disclosure: the ONLY key that can enter. Public by design. ──────────────────────
 # This is a *public* key. Publishing it is safe and is the whole point: you read it and
@@ -114,7 +114,7 @@ snapshot_surface() {
 
 # ─── Build the throwaway SSH endpoint (in tmpfs; nothing on durable disk). ────────────────
 WORKDIR=""; SSHD_PID=""; TUNNEL_PID=""; MONITOR_PID=""; BINDWATCH_PID=""; NAME=""; SID=""; SSHD_PORT=""
-PAIRCODE=""; BEFORE=""; AFTER=""; CONNECT_LOGGED=0
+PAIRCODE=""; BEFORE=""; AFTER=""; CONNECT_LOGGED=0; MARK_NONCE=""
 
 build_endpoint() {
   mkdir -p "$WORKDIR/recording"
@@ -132,6 +132,11 @@ build_endpoint() {
   fi
   SID="$(head -c8 /dev/urandom | od -An -tx1 | tr -d ' \n')"   # random, non-secret session id: routing + cert principal
   printf '%s\n' "$SID" > "$WORKDIR/principals"      # the cert principal we will accept (the sid, not the name)
+  # per-session marker nonce: SECRET (unlike SID), baked into the shell hooks + exec recorder and
+  # handed to the renderer out-of-band, so operator-controlled command OUTPUT cannot forge the
+  # live command-log without first reading this file off the box. 128-bit, hex (OSC-safe).
+  MARK_NONCE="$(head -c16 /dev/urandom | od -An -tx1 | tr -d ' \n')"
+  printf '%s' "$MARK_NONCE" > "$WORKDIR/marknonce"; chmod 600 "$WORKDIR/marknonce"
   ssh-keygen -t ed25519 -f "$WORKDIR/hostkey" -N '' -q -C "floo-$NAME"
 
   # Choose the box's auth gate by mode. CA mode: only the operator's CA-signed cert (principal=sid) gets in.
@@ -181,9 +186,17 @@ if [ -n "${SSH_ORIGINAL_COMMAND:-}" ]; then
       ;;
   esac
   in="$(cat)"
-  { echo "----- commands the operator ran -----"; printf '%s\n' "$in"; echo "----- output -----"; } >> "$log"
+  NONCE="$(cat "$DIR/marknonce" 2>/dev/null)"
+  __floo_osc() { printf '\033]1337;floo;%s;%s\007' "$NONCE" "$1" >> "$log"; }
+  # the cmd marker carries the ACTUAL piped script (SSH_ORIGINAL_COMMAND is just the literal
+  # `bash -s` shuttle). The renderer turns these markers into the readable command-log for BOTH
+  # the live view and the saved recording, so no separate human banner is needed.
+  __floo_osc "cmd;$(printf '%s' "$in" | base64 | tr -d '\n')"
+  __floo_osc "out"
   printf '%s' "$in" | { bash -c "$SSH_ORIGINAL_COMMAND"; } 2>&1 | tee -a "$log"
-  exit "${PIPESTATUS[1]}"
+  rc="${PIPESTATUS[1]}"
+  __floo_osc "end;$rc"
+  exit "$rc"
 fi
 # interactive shell. A support session must NEVER attach the operator's or client's existing
 # tmux: many shell rc files do `[[ -n $SSH_CONNECTION ]] && exec tmux ...` on login, which would
@@ -192,8 +205,19 @@ fi
 # (native size, keys, and Ctrl-C). Run it as a CHILD (not exec) so the EXIT trap clears the marker.
 trap '' INT                                         # Ctrl-C interrupts the shell's command, never this wrapper
 unset SSH_CONNECTION SSH_CLIENT SSH_TTY             # defeat SSH-auto-tmux in the user's shell rc
+# choose how to start the shell: hooked bash/zsh emits invisible command markers; other shells
+# start plainly and the live renderer falls back to cleaned stream output.
+ushell="${SHELL:-/bin/bash}"; sh_base="$(basename "$ushell")"
+if [ "$sh_base" = bash ] && [ -r "$DIR/hook.bash" ]; then
+  set -- "$ushell" --rcfile "$DIR/hook.bash" -i
+elif [ "$sh_base" = zsh ] && [ -r "$DIR/zdot/.zshrc" ]; then
+  export __FLOO_REAL_ZDOTDIR="${ZDOTDIR:-$HOME}" ZDOTDIR="$DIR/zdot"
+  set -- "$ushell" -i
+else
+  set -- "$ushell" -l
+fi
 if command -v script >/dev/null 2>&1; then
-  script -q -a "$log" -c "${SHELL:-/bin/bash} -l"    # keystroke-recorded where util-linux `script` exists
+  script -q -a "$log" -c "$(printf '%q ' "$@")"      # keystroke-recorded where util-linux `script` exists
 else
   # IMPORTANT: write the relay to a file and run it. `python3 - <<'PY'` would make the heredoc
   # Python's STDIN, so the relay could not read the operator's keystrokes (instant EOF → it broke,
@@ -204,7 +228,7 @@ else
 # Match the terminal size + forward SIGWINCH so the size is right; ignore INT/QUIT so Ctrl-C is
 # passed to the shell as a byte (raw mode delivers ^C, the shell handles it) and never crashes us.
 import os, pty, sys, tty, termios, fcntl, signal, select, struct
-log = open(sys.argv[1], "ab", buffering=0); shell = sys.argv[2]
+log = open(sys.argv[1], "ab", buffering=0); shell_argv = sys.argv[2:]
 for s in (signal.SIGINT, signal.SIGQUIT):
     try: signal.signal(s, signal.SIG_IGN)
     except Exception: pass
@@ -213,7 +237,7 @@ def winsz(fd):
     except Exception: return struct.pack("HHHH", 24, 80, 0, 0)
 pid, fd = pty.fork()
 if pid == 0:
-    os.execvp(shell, [shell, "-l"]); os._exit(127)
+    os.execvp(shell_argv[0], shell_argv); os._exit(127)
 def sync(*_):
     try: fcntl.ioctl(fd, termios.TIOCSWINSZ, winsz(0))
     except Exception: pass
@@ -247,10 +271,13 @@ finally:
     try: os.waitpid(pid, 0)
     except Exception: pass
 PY
-  python3 "$DIR/relay.py" "$log" "${SHELL:-/bin/bash}"   # stdin stays the operator's terminal
+  python3 "$DIR/relay.py" "$log" "$@"   # stdin stays the operator's terminal
 fi
 REC
   chmod 700 "$WORKDIR/record-session"
+  floo_hook_rc bash "$MARK_NONCE" > "$WORKDIR/hook.bash" 2>/dev/null || true
+  mkdir -p "$WORKDIR/zdot"; floo_hook_rc zsh "$MARK_NONCE" > "$WORKDIR/zdot/.zshrc" 2>/dev/null || true
+  chmod 600 "$WORKDIR/hook.bash" "$WORKDIR/zdot/.zshrc" 2>/dev/null || true
 
   # pick a free localhost port for the throwaway sshd
   SSHD_PORT="$(python3 -c 'import socket;s=socket.socket();s.bind(("127.0.0.1",0));print(s.getsockname()[1]);s.close()' 2>/dev/null || echo $(( (RANDOM % 20000) + 20000 )))"
@@ -393,14 +420,76 @@ bind_watcher() {
   done
 }
 
+# ─── Terminal frame: a scrolling pane above a pinned status row. ────────────────────────
+CON_ROWS=""
+_con_rows() {
+  local rows
+  if rows="$(tput lines 2>/dev/null)" && [ -n "$rows" ]; then echo "$rows"; return; fi
+  rows="$(stty size 2>/dev/null | awk '{print $1}')"
+  echo "${rows:-24}"
+}
+_con_setup() {
+  CON_ROWS="$(_con_rows)"
+  [ "${CON_ROWS:-0}" -gt 1 ] || CON_ROWS=24
+  printf '\033[1;%dr\033[%d;1H' $((CON_ROWS-1)) $((CON_ROWS-1))
+}
+_con_status() { printf '\033[s\033[%d;1H\033[2K%s\033[u' "$CON_ROWS" "$1"; }
+_con_teardown() { printf '\033[r\033[%d;1H\033[2K\033[?25h\n' "${CON_ROWS:-24}"; }
+_fmt_elapsed() { local s="$1"; printf '%dm%02ds' $((s/60)) $((s%60)); }
+_con_line() {
+  case "$1" in
+    waiting)   printf '%s◷ waiting for the technician to connect — Ctrl-C cancels%s' "$D" "$X";;
+    connected) printf '%s● technician connected · %s · Ctrl-C cuts the connection%s' "$G" "$2" "$X";;
+    finished)  printf '%s○ technician finished — Ctrl-C to close, or wait if they reconnect%s' "$D" "$X";;
+  esac
+}
+
+render_console() {
+  local read_only="${1:-0}" dir rpid start="" shown=0 idle=0 seen live now m p
+  dir="$WORKDIR"
+  if [ "$read_only" = 1 ]; then
+    dir="$(session_dir "$NAME")"
+    [ -d "$dir" ] || { warn "no support session is open right now."; exit 1; }
+  else
+    printf '%s\n' "$$" > "$dir/watch.pid"; mkdir -p "$dir/active"
+  fi
+  command -v python3 >/dev/null 2>&1 || {
+    if [ "$read_only" = 1 ]; then tail -n +1 -F "$dir"/recording/*.log 2>/dev/null; else monitor; fi
+    return
+  }
+  local last_status="" nonce; nonce="$(cat "$dir/marknonce" 2>/dev/null)"
+  trap '_con_setup; [ -n "${last_status:-}" ] && _con_status "$last_status"' WINCH
+  trap 'kill "$rpid" 2>/dev/null; _con_teardown; exit 0' INT TERM HUP
+  printf '\033[?25l'; _con_setup
+  ( tail -n +1 -F "$dir"/recording/*.log 2>/dev/null | FLOO_MARK_NONCE="$nonce" render_stream ) &
+  rpid=$!
+  seen="$( [ -f "$dir/sessions.log" ] && wc -l < "$dir/sessions.log" || echo 0 )"
+  last_status="$(_con_line waiting)"; _con_status "$last_status"
+  while kill -0 "$rpid" 2>/dev/null; do
+    for m in "$dir"/active/*; do
+      [ -e "$m" ] || continue; p="$(basename "$m")"; kill -0 "$p" 2>/dev/null || rm -f "$m"
+    done
+    live="$(ls "$dir/active" 2>/dev/null | wc -l)"
+    now="$( [ -f "$dir/sessions.log" ] && wc -l < "$dir/sessions.log" || echo 0 )"
+    if [ "${now:-0}" -gt "${seen:-0}" ] || [ "${live:-0}" -gt 0 ]; then
+      seen="$now"; idle=0; [ -z "$start" ] && start="$SECONDS"; shown=1; CONNECT_LOGGED=1
+      last_status="$(_con_line connected "$(_fmt_elapsed $((SECONDS-start)))")"; _con_status "$last_status"
+    elif [ "$shown" = 1 ]; then
+      idle=$((idle + 1))
+      [ "$idle" -ge 8 ] && { last_status="$(_con_line finished)"; _con_status "$last_status"; shown=0; idle=0; }
+    fi
+    sleep 1
+  done
+  _con_teardown
+}
+
 # ─── Read-only watch attach (second window: `floo --watch`). ───────────────────────
 watch_attach() {
   local dir; dir="$(session_dir "$NAME")"
   [ -d "$dir" ] || { warn "no support session is open right now."; exit 1; }
   ok "attached read-only to the $NAME support session — what the technician runs scrolls below."
   say "${D}(Ctrl-C just closes this view; it does NOT end the session.)${X}"
-  # follow whatever recordings exist now and appear later
-  tail -n +1 -F "$dir"/recording/*.log 2>/dev/null
+  render_console 1
 }
 
 status_only() {
@@ -411,87 +500,254 @@ status_only() {
   info "no support session for '$NAME' is open."; exit 1
 }
 
-# ─── Make a recording readable: strip terminal control sequences. ────────────────────────
-# The raw recording is the live terminal stream (zsh prompt colors, cursor moves, OSC
-# shell-integration markers), which is noise in an editor and makes `cat` jump the screen.
-# We strip it to plain, cat-safe text — far more useful as an audit/disclosure log.
+# ─── Live renderer: raw recording stream (stdin) → clean command-log lines (stdout). ─────────
+# Written to a file because it must read the operator stream on stdin.
+RENDER_PY=""
+write_render_py() {
+  [ -n "$RENDER_PY" ] && return 0
+  # inside a live session, place it in WORKDIR so teardown's `rm -rf "$WORKDIR"` reaps it; the
+  # standalone modes (--render/--watch/--clean-dir) fall back to a temp file they self-clean.
+  if [ -n "${WORKDIR:-}" ] && [ -d "$WORKDIR" ]; then RENDER_PY="$WORKDIR/render.py"
+  else RENDER_PY="$(mktemp "${TMPDIR:-/tmp}/floo-render.XXXXXX")" || return 1; fi
+  cat > "$RENDER_PY" <<'PY'
+import sys, os, re, base64, codecs
+# A floo command marker is ONLY honored when it carries the per-session nonce (FLOO_MARK_NONCE),
+# which the client bakes into the injected shell hooks + the exec recorder and passes to this
+# renderer out-of-band. Command OUTPUT (operator-controlled) therefore cannot forge a marker
+# without first exfiltrating the session nonce from the box's own files — closing the trivial
+# "print a fake $ command into the live pane" vector. Empty nonce => NO markers honored (safe).
+NONCE = os.environ.get('FLOO_MARK_NONCE', '')
+MARK_RE = re.compile(r'1337;floo;' + re.escape(NONCE) + r';(\w+)(?:;(.*))?$', re.S) if NONCE else None
+MAXSEQ = 1 << 16   # abandon an unterminated escape/OSC longer than this (anti-DoS, avoids O(n^2))
+out = sys.stdout
+cur = []
+col = 0
+state = {"lastcmd": "", "alt": False}
+decoder = codecs.getincrementaldecoder('utf-8')('replace')
+def emit(line):
+    out.write(line.rstrip() + "\n"); out.flush()
+def put(ch):
+    global col
+    while len(cur) <= col: cur.append(' ')
+    cur[col] = ch; col += 1
+def flush_line():
+    global col
+    emit(''.join(cur)); cur[:] = []; col = 0
+def sanitize_label(s):
+    # The command label is display-only: never let it carry raw escapes to the client terminal
+    # (those could overwrite the pinned status line / forge the connection indicator). Strip CSI/
+    # OSC sequences and C0 controls; keep newlines so a multi-line exec script renders as lines.
+    o = []; i = 0; n = len(s)
+    while i < n:
+        c = s[i]
+        if c == '\x1b':
+            if i+1 < n and s[i+1] == '[':
+                j = i+2
+                while j < n and s[j] in '0123456789;?': j += 1
+                while j < n and ' ' <= s[j] <= '/': j += 1
+                i = j+1 if j < n else n; continue
+            if i+1 < n and s[i+1] == ']':
+                j = i+2
+                while j < n and s[j] not in '\x07\x1b': j += 1
+                i = j+1; continue
+            i += 2; continue
+        if c == '\n': o.append('\n'); i += 1; continue
+        if c == '\t': o.append(' '); i += 1; continue
+        if ord(c) < 32: i += 1; continue
+        o.append(c); i += 1
+    return ''.join(o)
+def handle_marker(kind, arg):
+    if kind == "cmd":
+        try: raw = base64.b64decode(arg or "").decode('utf-8', 'replace')
+        except Exception: raw = arg or ""
+        cmd = sanitize_label(raw)
+        state["lastcmd"] = cmd.replace('\n', ' ').strip()
+        lines = cmd.split('\n')
+        emit("$ " + lines[0])
+        for extra in lines[1:]:
+            if extra.strip(): emit("  " + extra)
+    elif kind == "out":
+        pass
+    elif kind == "end":
+        try: code = int(arg or "0")
+        except ValueError: code = 0
+        if code != 0: emit("  ↳ exit %d" % code)
+def feed(text):
+    global col
+    i = 0; n = len(text)
+    while i < n:
+        # hold a partial alt-screen toggle that straddles the buffer end
+        held = None
+        for seq in ('\x1b[?1049h', '\x1b[?1049l'):
+            if n - i < len(seq) and seq.startswith(text[i:]): held = text[i:]
+        if held is not None: return held
+        if text.startswith('\x1b[?1049h', i):
+            if not state["alt"]:
+                state["alt"] = True
+                if cur: flush_line()
+                emit("▶ operator opened: " + (state["lastcmd"] or "a full-screen app"))
+            i += len('\x1b[?1049h'); continue
+        if text.startswith('\x1b[?1049l', i):
+            if state["alt"]:
+                state["alt"] = False
+                emit("◀ closed")
+            i += len('\x1b[?1049l'); continue
+        ch = text[i]
+        if ch == '\x1b':
+            if i+1 >= n: return text[i:]
+            nxt = text[i+1]
+            if nxt == '[':                                        # CSI
+                j = i+2
+                while j < n and text[j] in '0123456789;?': j += 1
+                while j < n and ' ' <= text[j] <= '/': j += 1
+                if j >= n:
+                    if n - i > MAXSEQ: i = n; break                # runaway: abandon
+                    return text[i:]
+                if not state["alt"]:                               # in alt mode, consume but ignore
+                    f = text[j]; p = re.sub(r'\?', '', text[i+2:j])
+                    nums = [int(x) for x in p.split(';') if x.isdigit()] or [0]
+                    if f == 'K':
+                        m = nums[0]
+                        if m == 0: del cur[col:]
+                        elif m == 1:
+                            for k in range(min(col+1, len(cur))): cur[k] = ' '
+                        else: cur[:] = []
+                    elif f == 'C': col += (nums[0] or 1)
+                    elif f == 'D': col = max(0, col-(nums[0] or 1))
+                    elif f == 'G': col = max(0, (nums[0] or 1)-1)
+                    elif f in ('H', 'f'): col = 0
+                i = j+1; continue
+            if nxt == ']':                                         # OSC — markers honored even in alt
+                j = i+2
+                while j < n and text[j] not in '\x07\x1b': j += 1
+                if j >= n:
+                    if n - i > MAXSEQ: i = n; break                # runaway unterminated OSC: abandon
+                    return text[i:]
+                body = text[i+2:j]
+                if text[j] == '\x07':
+                    end = j+1
+                else:                                             # ESC: real ST (ESC \) or a fresh escape
+                    if j+1 >= n: return text[i:]
+                    end = j+2 if text[j+1] == '\\' else j         # bare ESC -> drop malformed OSC, resume at it
+                if MARK_RE:
+                    m = MARK_RE.match(body)
+                    if m:
+                        if cur: flush_line()
+                        handle_marker(m.group(1), m.group(2))
+                i = end; continue
+            i += 2; continue                                       # other ESC x -> drop
+        if state["alt"]:                                           # suppress ordinary output during a TUI
+            i += 1; continue
+        if ch == '\r': col = 0; i += 1; continue
+        if ch == '\n': flush_line(); i += 1; continue
+        if ch == '\b': col = max(0, col-1); i += 1; continue
+        if ch == '\t': put(' '); i += 1; continue
+        if ord(ch) < 32: i += 1; continue
+        put(ch); i += 1
+    return ""
+pending = ""
+while True:
+    try: chunk = os.read(0, 65536)
+    except OSError: break
+    if not chunk: break
+    pending = feed(pending + decoder.decode(chunk, final=False))
+    if len(pending) > MAXSEQ * 2: pending = pending[-MAXSEQ:]      # never let a partial grow unbounded
+tail = decoder.decode(b"", final=True)
+if tail:
+    pending = feed(pending + tail)
+if cur: flush_line()
+PY
+}
+render_stream() {
+  write_render_py || return 1
+  python3 "$RENDER_PY"; local rc=$?
+  # standalone callers (no live WORKDIR to be wiped) self-clean the temp renderer script
+  { [ -z "${WORKDIR:-}" ] || [ ! -d "${WORKDIR:-}" ]; } && [ -n "$RENDER_PY" ] && rm -f "$RENDER_PY" 2>/dev/null
+  return $rc
+}
+
+# ─── Shell hooks: make the operator's shell announce each command via invisible private-OSC. ──
+# Markers carry the per-session NONCE (arg 2) so command output cannot forge them. The bash hook
+# captures the FULL typed command line from history (not $BASH_COMMAND, which is only the first
+# simple command AND mis-fires on a user PROMPT_COMMAND), armed only after PROMPT_COMMAND finishes.
+floo_hook_rc() {
+  local nonce="${2:-}"
+  case "$1" in
+    bash) cat <<RC
+# floo command-boundary hook (bash). Load the user's normal interactive env first.
+[ -r /etc/bash.bashrc ] && . /etc/bash.bashrc
+[ -r "\$HOME/.bashrc" ] && . "\$HOME/.bashrc"
+__floo_osc() { printf '\033]1337;floo;${nonce};%s\007' "\$1"; }
+__floo_armed=; __floo_ran=
+__floo_preexec() {
+  [ -n "\${COMP_LINE:-}" ] && return            # readline completion, not a command
+  [ -z "\$__floo_armed" ] && return             # PROMPT_COMMAND is running, or a later pipeline stage
+  case "\$BASH_COMMAND" in __floo_*) return;; esac
+  __floo_armed=; __floo_ran=1                    # disarm for the rest of THIS command line
+  local line; line=\$(HISTTIMEFORMAT= builtin history 1 2>/dev/null)
+  line=\${line#"\${line%%[![:space:]]*}"}        # ltrim
+  line=\${line#*[[:space:]]}                      # drop the history index number
+  line=\${line#"\${line%%[![:space:]]*}"}        # ltrim again -> the full typed command line
+  __floo_osc "cmd;\$(printf '%s' "\$line" | base64 | tr -d '\n')"
+  __floo_osc "out"
+}
+__floo_precmd() {                                # runs FIRST in PROMPT_COMMAND
+  local ec=\$?
+  [ -n "\$__floo_ran" ] && { __floo_osc "end;\$ec"; __floo_ran=; }
+  return \$ec
+}
+__floo_arm() { __floo_armed=1; }                 # runs LAST in PROMPT_COMMAND -> arm for the user's next line
+PROMPT_COMMAND="__floo_precmd\${PROMPT_COMMAND:+; \$PROMPT_COMMAND}; __floo_arm"
+trap '__floo_preexec' DEBUG
+RC
+    ;;
+    zsh) cat <<RC
+# floo command-boundary hook (zsh). Load the user's normal env from their real ZDOTDIR/HOME.
+[ -r "\${__FLOO_REAL_ZDOTDIR:-\$HOME}/.zshrc" ] && source "\${__FLOO_REAL_ZDOTDIR:-\$HOME}/.zshrc"
+__floo_osc() { printf '\033]1337;floo;${nonce};%s\007' "\$1" }
+__floo_ran=
+__floo_preexec() { __floo_ran=1; __floo_osc "cmd;\$(print -rn -- "\$1" | base64 | tr -d '\n')"; __floo_osc "out" }
+__floo_precmd() { local ec=\$?; [[ -n \$__floo_ran ]] && { __floo_osc "end;\$ec"; __floo_ran= }; }
+if autoload -Uz add-zsh-hook 2>/dev/null; then
+  add-zsh-hook preexec __floo_preexec
+  add-zsh-hook precmd  __floo_precmd
+else
+  typeset -ga preexec_functions precmd_functions
+  preexec_functions+=(__floo_preexec)
+  precmd_functions+=(__floo_precmd)
+fi
+RC
+    ;;
+    *) return 1;;
+  esac
+}
+
+# ─── Make a recording readable. ──────────────────────────────────────────────────────────
+# Runs each saved .log through the SAME renderer the live console uses: nonce-valid floo markers
+# become "$ command" lines, terminal control sequences collapse to the final visible text, and a
+# full-screen app shows as a one-liner. One renderer for the live pane AND the saved log means they
+# can never drift, and the saved recording is the readable command-log rather than raw escapes.
 clean_recordings() {
   local d="$1"; [ -d "$d" ] || return 0
   command -v python3 >/dev/null 2>&1 || return 0
-  python3 - "$d" <<'PY'
-import sys, os, re
-# A tiny terminal emulator: replay the recorded stream the way a terminal would DISPLAY it
-# (apply CR, cursor moves, and erase-line), so the line-editor's per-keystroke redraws and
-# autosuggestions collapse into the final visible line. A naive escape-strip would instead pile
-# up every redraw — producing doubled letters and phantom commands you never ran.
-def render(data):
-    text = data.decode('utf-8', 'replace')
-    lines=[]; cur=[]; col=0; i=0; n=len(text)
-    def put(ch):
-        nonlocal col
-        while len(cur) <= col: cur.append(' ')
-        cur[col]=ch; col+=1
-    while i < n:
-        ch = text[i]
-        if ch == '\x1b':
-            if i+1 < n and text[i+1] == '[':                     # CSI
-                j=i+2
-                while j<n and text[j] in '0123456789;?': j+=1
-                while j<n and ' ' <= text[j] <= '/': j+=1
-                if j<n:
-                    f=text[j]; p=re.sub(r'\?','',text[i+2:j])
-                    nums=[int(x) for x in p.split(';') if x.isdigit()] or [0]
-                    if f=='K':
-                        m=nums[0]
-                        if m==0: del cur[col:]
-                        elif m==1:
-                            for k in range(min(col+1,len(cur))): cur[k]=' '
-                        else: cur[:]=[]
-                    elif f=='C': col+=(nums[0] or 1)
-                    elif f=='D': col=max(0,col-(nums[0] or 1))
-                    elif f=='G': col=max(0,(nums[0] or 1)-1)
-                    elif f in ('H','f'): col=0
-                    i=j+1; continue
-                i=j; continue
-            if i+1 < n and text[i+1] == ']':                     # OSC: skip to BEL/ST
-                j=i+2
-                while j<n and text[j] not in '\x07\x1b': j+=1
-                if j<n and text[j]=='\x1b' and j+1<n and text[j+1]=='\\': j+=1
-                i=j+1; continue
-            i+=2; continue
-        if ch=='\r': col=0; i+=1; continue
-        if ch=='\n': lines.append(''.join(cur).rstrip()); cur=[]; col=0; i+=1; continue
-        if ch=='\b': col=max(0,col-1); i+=1; continue
-        if ch=='\t': put(' '); i+=1; continue
-        if ord(ch) < 32: i+=1; continue
-        put(ch); i+=1
-    if cur: lines.append(''.join(cur).rstrip())
-    res=[]; blank=0
-    for ln in lines:
-        if ln.strip()=='':
-            blank+=1
-            if blank<=1: res.append('')
-        else:
-            blank=0; res.append(ln)
-    return ('\n'.join(res).strip()+'\n').encode('utf-8','replace')
-d=sys.argv[1]
-for fn in os.listdir(d):
-    if not fn.endswith('.log'): continue
-    p=os.path.join(d,fn)
-    try: b=open(p,'rb').read()
-    except Exception: continue
-    try: open(p,'wb').write(render(b))
-    except Exception: pass
-PY
+  write_render_py || return 0
+  local f nonce; nonce="${FLOO_MARK_NONCE:-$MARK_NONCE}"
+  for f in "$d"/*.log; do
+    [ -f "$f" ] || continue
+    FLOO_MARK_NONCE="$nonce" python3 "$RENDER_PY" < "$f" > "$f.floo.tmp" 2>/dev/null \
+      && mv "$f.floo.tmp" "$f" || rm -f "$f.floo.tmp"
+  done
 }
 
 # ─── Teardown: the revoke. Runs on Ctrl-C, on close, on any exit. ────────────────────────
 teardown() {
   trap - EXIT INT TERM HUP
+  printf '\033[r\033[?25h' 2>/dev/null   # release any scroll region + show cursor
   echo
   info "closing the support session…"
   # kill whole process groups (negative pid) so no forked sshd/ssh child is orphaned
   [ -n "$MONITOR_PID" ] && kill "$MONITOR_PID" 2>/dev/null
+  [ -n "$RENDER_PY" ] && pkill -f "$RENDER_PY" 2>/dev/null   # reap the tail|renderer pipeline
   [ -n "$BINDWATCH_PID" ] && kill "$BINDWATCH_PID" 2>/dev/null
   [ -n "$TUNNEL_PID" ] && kill -TERM "-$TUNNEL_PID" 2>/dev/null
   [ -n "$SSHD_PID" ]   && kill -TERM "-$SSHD_PID"   2>/dev/null
@@ -541,6 +797,7 @@ teardown() {
   fi
 
   rm -rf "$WORKDIR" 2>/dev/null   # wipe the ephemeral keys + config
+  [ -n "$RENDER_PY" ] && rm -f "$RENDER_PY" 2>/dev/null   # the renderer's temp script
   ok "done. nothing is left running; a reboot would change nothing."
 }
 
@@ -582,11 +839,11 @@ run_session() {
     say "  ${D}it means someone else is trying to answer. Just close this window.${X}"
   fi
   say ""
-  info "watching for the technician to connect… (open a second window and run this with --watch to see what they do)"
+  info "the technician's commands will appear below as they work. Ctrl-C ends the session."
   say ""
 
-  monitor & MONITOR_PID=$!
   if [ "$FLOO_PUBLIC" = 1 ]; then bind_watcher & BINDWATCH_PID=$!; fi
+  render_console & MONITOR_PID=$!
   # block until the tunnel or endpoint dies, or the user interrupts
   wait "$TUNNEL_PID" 2>/dev/null
 }
@@ -694,6 +951,8 @@ main() {
   case "${1:-}" in
     -h|--help) usage; exit 0;;
     --version) echo "floo $FLOO_VERSION — by Agents Deployed · https://agents-deployed.com"; exit 0;;
+    --emit-hook) floo_hook_rc "${2:-bash}" "${3:-}"; exit $?;;
+    --clean-dir) [ "${FLOO_TESTING:-}" = 1 ] || exit 2; clean_recordings "${2:-}"; r=$?; [ -n "$RENDER_PY" ] && rm -f "$RENDER_PY" 2>/dev/null; exit $r;;
     config) shift; cmd_config "$@"; exit $?;;
     install) shift; cmd_install "$@"; exit $?;;
   esac
@@ -707,6 +966,8 @@ main() {
     --name) FLOO_NAME="$2"; shift 2;;
     --public) FLOO_PUBLIC=1; shift;;
     --watch) mode=watch; shift;;
+    --render) mode=render; shift;;
+    --console-frame) mode=conframe; shift;;
     --status) mode=status; shift;;
     --print-name) mode=printname; shift;;
     --show-operator) mode=showop; shift;;
@@ -723,6 +984,8 @@ main() {
   [ "$mode" = showop ] && { printf 'relay=%s:%s\n' "$FLOO_RELAY_HOST" "$FLOO_RELAY_PORT"; exit 0; }
   case "$mode" in
     watch) watch_attach;;
+    render) render_stream;;
+    conframe) CON_ROWS="$(_con_rows)"; _con_setup; _con_status "$(_con_line waiting)"; _con_teardown;;
     status) status_only;;
     session)
       [ -n "$NAME" ] || { warn "could not determine this box's name; set FLOO_NAME=…"; exit 1; }

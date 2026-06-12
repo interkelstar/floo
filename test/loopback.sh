@@ -41,7 +41,7 @@ cleanup() {
   [ -n "$RELAY_PID" ] && kill -TERM "-$RELAY_PID" 2>/dev/null
   pkill -f "$WORK" 2>/dev/null
   sudo rm -rf "$HELPBIN" 2>/dev/null
-  rm -rf "$WORK" "$RUN" "$HOME/.config/floo/sessions/testbot" "$HOME/.ssh/floo.d/testbot.conf" 2>/dev/null
+  rm -rf "$WORK" "$RUN" "$HOME/.config/floo/sessions/testbot" "$HOME/.ssh/floo.d/testbot.conf" "$HOME/.floo-last-session" 2>/dev/null
   sed -i '/127.0.0.1/d' "$HOME/.config/floo/relay_known_hosts" 2>/dev/null || true  # drop test relay pins
 }
 trap cleanup EXIT
@@ -143,6 +143,13 @@ else
   bad "no client-side recording of the session"
 fi
 
+# ── 5b. the recording is command-level: the exec path emits nonce-stamped floo markers ───
+if grep -aq '1337;floo;' "$RUN"/floo/testbot/recording/*.log 2>/dev/null; then
+  ok "recording carries nonce-stamped floo command markers (exec path)"
+else
+  bad "no floo command markers in the recording"
+fi
+
 # ── 6. an UNSIGNED key (no CA cert) is refused — only the operator CA gets in ─────────────
 ssh-keygen -t ed25519 -f "$WORK/rogue" -N '' -q
 # -F /dev/null on BOTH hops so we do NOT inherit the operator's cert from the real drop-in;
@@ -183,6 +190,16 @@ fi
 # the operator's cert really is short-lived
 CERT="$HOME/.config/floo/sessions/testbot/opkey-cert.pub"
 [ -f "$CERT" ] && ssh-keygen -Lf "$CERT" | grep -q 'Valid:.*to' && ok "operator cert is time-boxed (≤60m)" || note "cert file already cleaned"
+
+# ── 8. the SAVED (cleaned) recording is the rendered command-log; raw markers are gone ───
+KEEP="$THOME/.floo-last-session/recording"   # the client ran with HOME=$THOME
+if ls "$KEEP"/*.log >/dev/null 2>&1; then
+  grep -aq '1337;floo' "$KEEP"/*.log 2>/dev/null && bad "raw floo markers leaked into the cleaned recording" || ok "cleaned recording has no raw floo OSC markers"
+  grep -aq 'MARKER_42' "$KEEP"/*.log 2>/dev/null && ok "cleaned recording keeps the real output" || note "MARKER_42 absent in cleaned recording (timing)"
+  grep -aqE '^\$ ' "$KEEP"/*.log 2>/dev/null && ok "cleaned recording rendered a \$ command line (marker -> command-log)" || note "no \$ command line in cleaned recording"
+else
+  note "no ~/.floo-last-session recording saved — skipping cleaned-save check"
+fi
 
 echo
 echo "=== $PASS passed, $FAIL failed ==="

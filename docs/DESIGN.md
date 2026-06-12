@@ -5,23 +5,23 @@
 The box never listens for inbound support. `floo` makes the box **dial out** to the relay, and
 that single foreground process **is** the access grant. Kill it → access is gone. Nothing is enabled at
 boot, so a reboot can't reopen it. Everything else (who may enter, recording, the client's watch view,
-the state-diff) layers on top of: **no live dial-out → no access.**
+the state-diff, and the live command log) layers on top of: **no live dial-out → no access.**
 
 ## Components & roles
 
 | Component | Where it runs | Role |
 |---|---|---|
-| `floo` | the **client** box, as the client's user | dial out, stand up a throwaway cert-only sshd, show the pairing code, record, tear down |
-| relay (`install-relay.sh` → dedicated sshd + `gw`) | the **operator** box | dumb switchboard: maps `name` → a client's live reverse socket; splices ciphertext |
+| `floo` | the **client** box, as the client's user | dial out, stand up a throwaway sshd gated by CA mode or quick mode, show the pairing code, render the live command log, record, tear down |
+| relay (`install-relay.sh` → dedicated sshd + `gw`) | the **operator** box | dumb switchboard: maps a random session id → a client's live reverse socket; splices ciphertext |
 | `floo-route` | relay, as `gw` (ForceCommand) | the only thing `gw` can do: register / meta / route / deregister / list |
 | `floo-authkeys` | relay (AuthorizedKeysCommand) | accept any key (so no private key is published); the `Match` block makes `gw` powerless |
-| `bin/floo-powder` | the **operator** box | ca-init / list / connect (verify code, pin host key, mint cert) / exec / close / gc |
+| `bin/floo-powder` | the **operator** box | ca-init / list / connect by code (pin host key, mint cert or bind a quick-mode key) / exec / close / gc |
 
 ## Identity
 
-The **name** is the single natural key: the client's Unix login user, the relay socket name, the ssh
-`Host` alias, and the cert principal. Keep it to a DNS-label charset (it routes a unix socket + an ssh
-alias). The name is a *name/route*, never an authenticator — auth rests on the cert and the pairing code.
+The relay route is a random 16-hex **session id**. The human-readable name is only a display label and
+operator-side ssh alias; it is not an authenticator and is not trusted for uniqueness across a fleet.
+Auth rests on the certificate/code proof and the pairing code.
 
 `floo` resolves it via a generic fallback chain: `--name` / `FLOO_NAME` → an optional
 `FLOO_IDENTITY_HOOK` (a script that prints the name — how a deployment plugs in its own naming, e.g. from
@@ -30,11 +30,11 @@ a provisioning manifest) → `hostname -s` → `id -un`.
 ## Two independent handshakes (keep them apart)
 
 **Operator → box** ("is this really the operator?") = an **SSH certificate**. The client's throwaway
-sshd trusts only the operator **CA public key** (embedded in `floo`, `TrustedUserCAKeys`). To
-connect, the operator mints a **≤60-minute cert**, principal = name, signed by the CA private key
-(operator box only, in no repo). The cert principal must appear in the client's `AuthorizedPrincipalsFile`
-and the login user must be the client's Unix user (`loginuser`, carried in the registration). Cert expiry
-is the backstop; the live process is the real revoke.
+sshd trusts only the operator **CA public key** (`TrustedUserCAKeys`). To connect in CA mode, the
+operator mints a **≤60-minute cert**, principal = the session id, signed by the CA private key (operator
+box only, in no repo). The cert principal must appear in the client's `AuthorizedPrincipalsFile` and the
+login user must be the client's Unix user (`loginuser`, carried in the registration). Cert expiry is the
+backstop; the live process is the real revoke.
 
 **Both ends → relay** ("is this the real relay, not a hijack of `relay.example.com`?") = a
 **pinned relay host key**. Its public half is embedded in `floo` (`FLOO_RELAY_HOSTKEY`) and pinned
@@ -43,38 +43,41 @@ key. `accept-new` still onboards a genuinely-new relay, but a *mismatch* against
 without this, a MITM'd relay could forge the pairing code + client host key the operator relies on.
 
 **Box → operator** ("is this my real box, not a squatter on my name?") = a **human pairing code**.
-The client prints `XXXX-XXXX` on its own screen and registers it (with its ephemeral host public key) at
-the relay. `floo-powder connect` shows the operator the relay's copy; the operator confirms it matches
-what the client read out-of-band **before** connecting or pushing anything. The host key from the same
-registration is pinned (`UserKnownHostsFile` under `HostKeyAlias=<name>`), so a confirmed code also
-authenticates the box's key. Cert proves operator→box; code+pin prove box→operator. Mutual.
+The client prints a code on its own screen and registers only its hash (plus its ephemeral host public
+key) at the relay. `floo-powder connect <code>` resolves that code to exactly one live session; the host
+key from the same registration is pinned (`UserKnownHostsFile` under `HostKeyAlias=<label>`), so a
+confirmed code also authenticates the box's key. Cert or quick-mode code proof proves operator→box;
+code+pin prove box→operator. Mutual.
 
 ## Wire contract (env-overridable; defaults in `()` )
 
 - relay endpoint: `FLOO_RELAY_HOST` (`relay.example.com`), `FLOO_RELAY_PORT` (`443`),
   `FLOO_RELAY_USER` (`gw`), socket namespace `FLOO_RELAY_SOCK_DIR` (`/run/floo`),
   pinned relay host key `FLOO_RELAY_HOSTKEY` (embedded; env-overridable for tests).
-- relay socket: `<sockdir>/<name>.sock` (the client's reverse unix-socket forward).
-- relay meta: `<sockdir>/<name>.meta` (`code`, `loginuser`, `registered`, `peer`, `hostkey`).
+- relay socket: `<sockdir>/<sid>.sock` (the client's reverse unix-socket forward).
+- relay meta: `<sockdir>/<sid>.meta` (`code` hash, `loginuser`, `label`, `quick`, `registered`, `peer`, `hostkey`).
 - dispatcher commands (`$SSH_ORIGINAL_COMMAND` under the `gw` ForceCommand):
-  - `register <name> <CODE> <loginuser> <hostkey...>`
-  - `meta <name>` → `socket=live|absent` + the meta fields
-  - `route <name>` → `exec nc -U <sockdir>/<name>.sock` (the operator pivot)
-  - `deregister <name>` → remove socket + meta (client teardown)
-  - `list` → live sessions (dead ones GC'd)
+  - `register <sid> <codehash> <loginuser> <label> [quick=1] <hostkey...>`
+  - `resolve <codehash>` → `socket=live` + the meta fields + `sid`
+  - `meta <sid>` → `socket=live|absent` + the meta fields
+  - `route <sid>` → `exec nc -U <sockdir>/<sid>.sock` (the operator pivot)
+  - `bindop <sid> <hmac> <operator-key...>` / `getop <sid>` for quick mode
+  - `deregister <sid>` → remove socket + meta + quick binds (client teardown)
+  - `list` → live/known sessions by label (dead ones GC'd)
 - operator transport: `bin/floo-powder connect` writes `~/.ssh/floo.d/<name>.conf` with a
-  `ProxyCommand ssh … gw@relay route <name>`; then plain `ssh <name>` / `rsync … <name>:` work.
+  `ProxyCommand ssh … gw@relay route <sid>`; then plain `ssh <name>` / `rsync … <name>:` work.
 
 ## Lifecycle
 
-1. **Client** (`floo`): snapshot the access surface → write tmpfs workdir (`$XDG_RUNTIME_DIR/floo/<name>`, mode-0700) → ephemeral ed25519 host key → cert-only `sshd_config` → start sshd under `setsid` (own process group) → generate a throwaway client key, `register` at the relay, open `ssh -N -R <sockdir>/<name>.sock:127.0.0.1:<port> gw@relay` under `setsid` → print the pairing code → monitor the sshd log for connect/disconnect.
-2. **Operator**: `list` → `connect <name>` (confirm the code, pin the host key, mint the cert, drop the ssh-config include) → `ssh`/`rsync`/`exec`.
-3. **Teardown** (Ctrl-C / window close / any exit): `kill -- -PGID` the tunnel and sshd groups (reaps every forked child — no orphans) → best-effort `deregister` at the relay → confirm the local port is unbound → after-snapshot + diff → wipe the tmpfs workdir. The recording + any change-diff are copied to `~/.floo-last-session` first.
+1. **Client** (`floo`): snapshot the access surface → write private workdir (`$XDG_RUNTIME_DIR/floo/<label>` or `$HOME/.local/state/floo/<label>`, mode-0700) → ephemeral ed25519 host key → throwaway `sshd_config` (CA-trusted certs by default, code-authorized key in quick mode) → start sshd under `setsid` (own process group) → generate a throwaway client key, `register` the random sid/codehash at the relay, open `ssh -N -R <sockdir>/<sid>.sock:127.0.0.1:<port> gw@relay` under `setsid` → print the pairing code → render the merged live console.
+2. **Operator**: `connect <code>` resolves the sid, pins the client host key, mints a cert in CA mode or binds an ephemeral key in quick mode, drops the ssh-config include → `ssh`/`rsync`/`exec`.
+3. **Recording + live view**: the recorder writes raw pty bytes to `recording/*.log`. Bash/zsh hooks and the exec path add invisible private OSC markers for `cmd`/`out`/`end`, each stamped with a **secret per-session nonce**; the client-side renderer honours a marker only if the nonce matches (so operator-controlled command *output* cannot forge or hide a command line), sanitizes the command label of all control sequences, and turns the stream into a clean command log above a pinned status line. Full-screen TUI apps are collapsed to "opened"/"closed" notes. The bash hook captures the full typed line from history, armed only after `PROMPT_COMMAND` runs, so a custom `PROMPT_COMMAND` cannot mislabel the command. The same renderer produces the saved recording, so live and saved views never drift.
+4. **Teardown** (Ctrl-C / window close / any exit): release the terminal scroll region → `kill -- -PGID` the tunnel and sshd groups (reaps every forked child — no orphans) → best-effort `deregister` at the relay → confirm the local port is unbound → after-snapshot + diff → save a cleaned, marker-free recording and any change-diff to `~/.floo-last-session` → wipe the workdir.
 
 ## Two payloads on one substrate
 
 - **Audit (read-only):** `floo-powder exec <name> < snapshot.sh` (the `openclaw-client-audit`
-  recipe). Recorded on the client; the operator gets the verdict.
+  recipe). Recorded and rendered live on the client; the operator gets the verdict.
 - **Upgrade (mutating):** the toolbox is **pushed from the operator** after connecting
   (`rsync … <name>:`), never pulled — no repo credential ever lands on a client box. The upgrade
   replays a versioned, validated artifact (toolbox@tag + `_scripts` + `contract.sh` guards), not
@@ -114,5 +117,5 @@ authenticates the box's key. Cert proves operator→box; code+pin prove box→op
   fetched script, not secrecy).
 - Full `homenum-revelio` reuse for a deep audit is operator-pushed during a session; `floo`'s
   built-in state-diff is the self-contained 3-surface (keys/units/cron) disclosure.
-- Mirroring the bot's non-interactive `exec` into the client's live `--watch` pane (a `ForceCommand`
-  tee) — worth it at product scale; the exec is still recorded + state-diffed today.
+- A scrollback UI with pause/search. The saved cleaned recording covers after-the-fact review; the live
+  view stays deliberately simple.

@@ -16,6 +16,7 @@
 | Network / relay-in-the-middle (DNS hijack of `relay.example.com`, on-path) | read/alter a session, or impersonate the relay to feed forged metadata | The operator's SSH terminates at the **client's** sshd; the relay only splices ciphertext (`nc -U` pivot) — it cannot read or inject. The client host key is pinned. **The relay's own host key is also pinned** — embedded in `floo` (`FLOO_RELAY_HOSTKEY`) and pinned operator-side at `ca-init` — so a hijacked relay presenting a different key is **rejected**, not trusted on first contact (closing the path where a MITM'd relay forges the pairing code + client host key). |
 | Malicious/abusive relay client | use the relay as a proxy or pivot | The `gw` account is confined by the sshd `Match` block to a **reverse unix-socket forward only** — `AllowTcpForwarding remote` + `PermitListen none` block `-L` and `-R`-TCP; no shell, no pty, no agent/X11/tunnel; the sole command is the dispatcher. |
 | A departed technician (the operator themselves) | retain standing access after a session | Access is the live foreground process; Ctrl-C/HUP/close tears down the endpoint + tunnel (process-group kill, no orphans) and deregisters. Nothing is enabled at boot. The before/after **state-diff** surfaces any keys/units/cron the operator added. |
+| Confused or anxious client | decide whether to revoke while help is happening | The default client window shows a live command log — stamped with a per-session secret nonce so the operator's command *output* cannot forge or hide a command — plus a pinned Ctrl-C status line. Disclosure, not containment (see residual #5), but it removes the old need for a second `--watch` terminal. |
 
 ## What is explicitly NOT promised
 
@@ -41,14 +42,28 @@
    until reboot. It is **not reachable** (the tunnel and its relay socket are gone, so there is no inbound
    path), and a reboot clears it. Graceful exits (Ctrl-C / close / TERM / HUP) tear down fully.
 4. **Recording covers the support channel, not the universe.** Non-interactive `exec` (audits, upgrades —
-   where it matters) is fully tee-recorded. **Interactive** shells run as a *native* login shell with the
-   SSH markers stripped so they can never auto-attach the operator's/client's shared tmux (a shell rc doing
-   `[[ -n $SSH_CONNECTION ]] && exec tmux` would otherwise hijack — and a teardown could kill — that
-   session); they are keystroke-recorded only where util-linux `script` is present, otherwise the
-   disclosure for an interactive session is the `sessions.log` entry + the before/after state-diff. The
-   bot's `exec` also doesn't stream into the client's live `--watch` pane (a `ForceCommand` tee would add
-   that). Teardown kills the sshd by its own PID file, never a process-name pattern.
-5. **State-diff scope** is the three access surfaces (authorized_keys across readable homes, enabled
+   where it matters) is fully tee-recorded and marked for the live command log. **Interactive** shells run
+   as a *native* login shell with the SSH markers stripped so they can never auto-attach the
+   operator's/client's shared tmux (a shell rc doing `[[ -n $SSH_CONNECTION ]] && exec tmux` would
+   otherwise hijack — and a teardown could kill — that session). Where util-linux `script` is present,
+   the pty is recorded; otherwise the Python relay records the pty if python3 is available. If neither is
+   available, the disclosure for an interactive session degrades to the `sessions.log` entry + the
+   before/after state-diff. Bash/zsh hooks add exact command boundaries; other shells still produce a
+   cleaned output stream. Teardown kills the sshd by its own PID file, never a process-name pattern.
+5. **The live command log is integrity-checked against output forgery, but is not a sandbox.** Each
+   session mints a *secret per-session marker nonce*; the injected bash/zsh hooks and the `exec` recorder
+   stamp every command marker with it, and the renderer honours a marker **only** if the nonce matches.
+   Command **output** — which the operator fully controls — therefore cannot forge a `$ command` line,
+   cannot hide a real command behind a fabricated full-screen app (a forged alt-screen never blinds the
+   renderer to nonce-valid markers), and cannot smuggle raw escape sequences onto the client's screen (the
+   command label is stripped of all control sequences before display). What remains: an operator with an
+   *interactive* shell runs as the client's own user and can read the session's own files (the recording,
+   the hook rc) to recover the nonce, or simply unset the hooks / start an unhooked shell. So the **live**
+   pane is trustworthy against output-borne forgery but is **not** a containment boundary against a
+   determined operator — it is a transparency aid for a cooperating-but-watched operator. The **raw
+   recording** (tee'd to the client's disk, marker-rendered and cleaned on save) remains the tamper-evident
+   record, and the Ctrl-C revoke + before/after state-diff are unchanged.
+6. **State-diff scope** is the three access surfaces (authorized_keys across readable homes, enabled
    systemd user+system units, user + system cron). It is a disclosure of *those* surfaces, not a full
    integrity scan; a deep `homenum-revelio` audit can be operator-pushed for more.
 

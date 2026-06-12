@@ -1,4 +1,44 @@
 # Changelog
+## 0.5.0 — 2026-06-13
+
+### Added
+- **Merged live console (default view).** The client's single window now shows the
+  operator's commands and output in real time — a scrolling command-log pane above a
+  status line glued to the bottom row (waiting / connected+elapsed / finished, each
+  with the Ctrl-C affordance). Single-terminal clients (e.g. Cockpit) no longer need a
+  second window to see activity, and can make an informed Ctrl-C.
+- Command boundaries are captured via injected bash/zsh hooks emitting invisible
+  private-OSC markers; the `exec`/bot path emits the same markers (carrying the real
+  piped script, not the `bash -s` shuttle). Full-screen TUI apps collapse to a one-line
+  note rather than mirror.
+- **Friend-to-friend over a public relay.** `floo --public --relay floo.kelstar.me
+  --pin …` lets two people share recorded, revocable support with nothing to host — the
+  operator connects with just the code. Self-hosting (CA mode) stays the default for
+  anything ongoing.
+
+### Security
+- **Per-session marker nonce.** Every command marker is stamped with a secret
+  per-session nonce; the renderer honours a marker only if the nonce matches. Operator
+  command **output** can no longer forge a `$ command` line, hide a real command behind
+  a forged full-screen app, or smuggle escape sequences onto the client's screen (the
+  command label is fully control-sanitized; a forged alt-screen never blinds the parser
+  to real markers). The live pane is a transparency aid for a cooperating operator, not
+  a sandbox — see THREAT-MODEL residual #5.
+- **bash command capture rewritten** to read the full typed line from history, armed
+  only after `PROMPT_COMMAND` completes — so a user's custom `PROMPT_COMMAND` (the stock
+  Fedora/RHEL default) can no longer mislabel or hide the operator's real command, and
+  pipelines / compound commands are captured in full.
+- Renderer hardened: bounded escape/OSC scanning (no O(n²) on malformed input), no
+  stray-fragment leak on a bare ESC inside an OSC, and no leftover temp files.
+
+### Notes
+- No relay or wire-protocol change; CA and quick (no-cert) modes are unaffected. The
+  saved recording is the rendered command-log (markers become `$ command` lines, raw
+  escapes stripped) via the same renderer the live pane uses. Non-bash/zsh shells
+  degrade to a cleaned line view; boxes without python3 fall back to the status line.
+- `floo --watch` still works as a read-only second-window attach, now reusing the
+  same console.
+
 ## 0.4.0 — 2026-06-12
 - **no-cert (quick) mode** — a client can open a code-only session that any operator takes with just the
   code, no operator CA. `floo --public` stands up a CA-less throwaway sshd (empty authorized_keys), shows a

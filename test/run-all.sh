@@ -11,6 +11,7 @@ bash "$DIR/unit/dispatcher.sh" || rc=1
   bash "$DIR/unit/config.sh" || rc=1
   bash "$DIR/unit/init.sh" || rc=1
   bash "$DIR/unit/embed.sh" || rc=1
+  bash "$DIR/unit/render.sh" || rc=1
 
 echo; echo "########## loopback A: clean session (no surface change) ##########"
 bash "$DIR/loopback.sh" || rc=1

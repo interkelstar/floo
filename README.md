@@ -5,9 +5,10 @@ bastion's security posture, for the terminal. You hand it to someone whose box y
 
 A client types one command **only when they want help**. Their machine dials **out** to a relay you run
 and stands up a throwaway SSH endpoint that **only you** can enter. While it's open they see a pairing
-code and `● a technician is connected`; the whole session is **recorded to their own disk**. When they
-press **Ctrl-C** it's over — the endpoint dies, the keys are wiped, and they're shown whether anything on
-their box changed. Nothing is installed, nothing runs as root, nothing survives a reboot.
+code, then your commands and output scroll live in that same window; the whole session is **recorded to
+their own disk**. When they press **Ctrl-C** it's over — the endpoint dies, the keys are wiped, and
+they're shown whether anything on their box changed. Nothing is installed, nothing runs as root, nothing
+survives a reboot.
 
 > Spell-themed: the relay is the *Floo Network*; a client `floo`s their hearth onto it, and the operator
 > throws *floo powder* (`floo-powder`) to travel through to a box.
@@ -28,14 +29,14 @@ Only when you want help. Whoever's helping you hands you a one-line command — 
 the pairing code it prints:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/interkelstar/floo/v0.1.0/floo \
+curl -fsSL https://raw.githubusercontent.com/interkelstar/floo/v0.5.0/floo \
   | bash -s -- --relay relay.example.com --pin 0123456789abcdef
 ```
 
 The `--pin` is a short fingerprint of the operator's relay. `floo` verifies the relay against it, then
 fetches the operator's key *from* the relay — so there are no long keys to paste (and nothing for a
 terminal to fold and corrupt). The URL is a version tag, so you run exactly the code you can read at
-`github.com/interkelstar/floo/tree/v0.1.0`.
+`github.com/interkelstar/floo/tree/v0.5.0`.
 
 …or, if you'll get support more than once, **install it and save your operator once**:
 
@@ -46,7 +47,16 @@ floo                                                                 # any time 
 ```
 
 Read the pairing code back to whoever is helping you — they must repeat it before they can connect.
-`floo --watch` (second terminal) shows live what they do. **Ctrl-C** ends it.
+While they're connected you see their commands and output scroll live in this same window, with a
+status line pinned at the bottom; **Ctrl-C** ends it. (`floo --watch` in a second terminal still
+gives the same read-only view if you prefer.)
+
+### What you'll see
+
+The live view is a command log, not a screen-share. Normal commands appear as `$ command` followed by
+their text output. Full-screen tools such as `vim`, `less`, or `top` are collapsed to an "opened" /
+"closed" note so they cannot take over the status row. The saved recording under
+`~/.floo-last-session/recording/` is cleaned for reading on exit.
 
 ### Don't trust us — read us
 
@@ -56,8 +66,8 @@ Read the pairing code back to whoever is helping you — they must repeat it bef
   in plain sight). Only the matching private key, which lives only on the operator's machine, can mint a
   login. Per session, the operator's certificate is good for **≤60 minutes**.
 - Access lasts only while the process is alive. Ctrl-C / closing the window revokes it.
-- The session is **recorded** to your disk, and every change to your SSH keys, enabled services, or
-  scheduled jobs is shown to you on exit (`~/.floo-last-session/`).
+- The session is shown live, **recorded** to your disk, and every change to your SSH keys, enabled
+  services, or scheduled jobs is shown to you on exit (`~/.floo-last-session/`).
 
 The honest promise is **disclosure, not prevention**: a shell can change a machine; what `floo` guarantees
 is that it runs as *your* user, is recorded, and any change to your access surfaces is surfaced to you.
@@ -70,7 +80,7 @@ nothing else to clone and you can audit exactly what gets root. Fetch it, read i
 your relay:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/interkelstar/floo/v0.4.0/bin/floo-powder -o floo-powder
+curl -fsSL https://raw.githubusercontent.com/interkelstar/floo/v0.5.0/bin/floo-powder -o floo-powder
 less floo-powder                     # read it — incl. the embedded relay that `init` sudo-runs, inline + readable
 sh floo-powder install               # install into ~/.local/bin (self-fetches if piped)
 floo-powder init                     # turnkey: keys + stands up the embedded relay + prints the client one-liner
@@ -91,6 +101,10 @@ floo-powder list                     # open sessions (label + id) — situationa
 # point at a relay you don't own (relay on a separate box, a friend's relay):
 floo-powder --relay vps.example.com --pin <fp> connect <code>
 ```
+
+When you open an interactive shell, the client sees a live command log in their `floo` window. Bash and
+zsh sessions get exact command boundaries through invisible shell markers; other shells still show a
+cleaned output stream. Non-interactive `floo-powder exec` uses the same command markers.
 
 `floo-powder init` prints the exact one-liner (and an importable config blob) to hand to clients. The
 relay is a dedicated, isolated `sshd` serving a single powerless `gw` account; it splices ciphertext and
@@ -124,14 +138,38 @@ squat the session. This is **strictly weaker than CA mode** — anyone who learn
 Caps under `--allow-quick`: max concurrent quick sessions + a short session TTL (per-IP throttling is the relay
 sshd's existing per-source limits + fail2ban).
 
+### Friend-to-friend — nothing to host, use the public relay
+
+Helping a friend (or getting help) and neither of you wants to run a relay? Use the **public floo relay** at
+`floo.kelstar.me` — a free, no-cert rendezvous you can point at right out of the box:
+
+```bash
+# the person who needs help (the client) runs this and reads back the code it prints:
+curl -fsSL https://raw.githubusercontent.com/interkelstar/floo/v0.5.0/floo \
+  | bash -s -- --public --relay floo.kelstar.me --pin df2b83ff925f89bd
+
+# the person helping (the operator) installs floo-powder once, then connects with that code:
+floo-powder --relay floo.kelstar.me --pin df2b83ff925f89bd connect <code>
+```
+
+The `--pin df2b83ff925f89bd` is the relay's host-key fingerprint (public — it's how `floo` verifies it's
+reaching the real relay and not a MITM). The **code is the only secret**: read it to the *one* person you
+mean to let in, and close the window when you're done. Everything else is identical to a self-hosted
+session — the helper gets a shell, you watch the live command log, the session is recorded to your disk, and
+Ctrl-C revokes. For anything ongoing or sensitive, stand up your own relay (one command, above) and use CA
+mode; the public relay is a courtesy for one-off "just help me right now" moments.
+
 ## How it works
 
-`floo` (client) dials out to your relay and opens a cert-only throwaway `sshd`, registering under a random
-session id with a one-time **code** it shows the client. `floo-powder connect <code>` resolves that code to
+`floo` (client) dials out to your relay and opens a throwaway `sshd`, registering under a random
+session id with a one-time **code** it shows the client. In CA mode the endpoint accepts only an
+operator-CA-signed cert; in quick mode it accepts the single operator key proven by the code.
+`floo-powder connect <code>` resolves that code to
 the session — so you reach the *genuine* client by construction (a squatter registered a different code, so
 your code never resolves to them), with no name to collide across a fleet. It pins the relay + client host
 keys, mints a ≤60-min cert (bound to that session id), and connects end-to-end *through* the relay.
-Recording + before/after state-diff; Ctrl-C/close = full teardown.
+The client's window renders a live command log from the local recording, while teardown saves a cleaned
+recording + before/after state-diff. Ctrl-C/close = full teardown.
 
 Design & threat model: [`docs/DESIGN.md`](docs/DESIGN.md), [`docs/THREAT-MODEL.md`](docs/THREAT-MODEL.md).
 Tests: `bash test/run-all.sh` (unit + a full single-host loopback proving cert-only entry, the
