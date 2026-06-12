@@ -7,21 +7,24 @@
 # as the unprivileged gw user. The relay is a DUMB PIVOT: `route` splices bytes between the
 # operator and a client's already-encrypted SSH endpoint — it never sees session plaintext.
 #
+# Sessions are keyed by a random, non-secret SID. The operator never knows the SID up front —
+# it `resolve`s it from the pairing code the client read aloud. So routing is by code, not name.
+#
 # Subcommands (taken from $SSH_ORIGINAL_COMMAND):
-#   register <botname> <CODEHASH> <loginuser> <hostkey...> client publishes sha256(code) + host key
-#   verify <botname> <CODEHASH>                          operator checks the code without it ever leaking
-#   meta <botname>                                       operator reads it back to verify the code
-#   route <botname>                                      operator pivot: connect to the client socket
-#   deregister <botname>                                 client teardown removes its socket + meta
-#   list                                                 enumerate sessions (dead ones GC'd)
-#   opconfig                                             serve the operator PUBLIC CA (pin-bootstrap)
+#   register <sid> <codehash> <loginuser> <label> <hostkey...>  client publishes a session
+#   resolve <codehash>                                          operator: code -> sid + session meta
+#   meta <sid> | route <sid> | deregister <sid>                 operator/client by sid
+#   list                                                        enumerate sessions (label, not code)
+#   opconfig                                                    serve the operator PUBLIC CA (pin-bootstrap)
 set -u
 
 SOCKDIR="${FLOO_RELAY_SOCK_DIR:-/run/floo}"
 CA_FILE="${FLOO_OPERATOR_CA_FILE:-/etc/floo/operator_ca.pub}"
 
 log() { logger -t floo-route -- "$*" 2>/dev/null || true; }
-valid_botname() { [[ "$1" =~ ^[a-z0-9][a-z0-9-]{0,62}$ ]]; }   # DNS label → can't escape SOCKDIR
+valid_sid()      { [[ "$1" =~ ^[a-f0-9]{16}$ ]]; }                 # random routing id → can't escape SOCKDIR
+valid_codehash() { [[ "$1" =~ ^[a-f0-9]{64}$ ]]; }
+valid_label()    { [[ "$1" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,62}$ ]]; }   # display only
 deny() { echo "floo: $1" >&2; log "deny: $1 (peer ${SSH_CONNECTION:-?})"; exit 1; }
 
 # A killed tunnel leaves a STALE socket file behind (sshd's StreamLocalBindUnlink only clears
@@ -40,74 +43,80 @@ socket_live() {
   esac
 }
 # unlink stale socket + its meta (self-heals after a power loss / SIGKILL where deregister never ran)
-gc_dead() { local b="$1"; [ -e "$SOCKDIR/$b.sock" ] && ! socket_live "$SOCKDIR/$b.sock" && rm -f "$SOCKDIR/$b.sock" "$SOCKDIR/$b.meta"; return 0; }
+gc_dead() { local s="$1"; [ -e "$SOCKDIR/$s.sock" ] && ! socket_live "$SOCKDIR/$s.sock" && rm -f "$SOCKDIR/$s.sock" "$SOCKDIR/$s.meta"; return 0; }
 
 read -ra A <<<"${SSH_ORIGINAL_COMMAND:-}"
-cmd="${A[0]:-}"; bn="${A[1]:-}"
+cmd="${A[0]:-}"
 
 case "$cmd" in
   register)
-    valid_botname "$bn" || deny "bad botname"
-    code="${A[2]:-}"
-    [[ "$code" =~ ^[a-f0-9]{64}$ ]] || deny "bad pairing code hash"
-    loginuser="${A[3]:-}"
-    [[ "$loginuser" =~ ^[a-z_][a-z0-9_-]{0,31}$ ]] || deny "bad login user"
-    hostpub="${A[*]:4}"
-    [ -n "$hostpub" ] || deny "missing host key"
+    sid="${A[1]:-}";       valid_sid "$sid"           || deny "bad sid"
+    ch="${A[2]:-}";        valid_codehash "$ch"       || deny "bad code hash"
+    loginuser="${A[3]:-}"; [[ "$loginuser" =~ ^[a-z_][a-z0-9_-]{0,31}$ ]] || deny "bad login user"
+    label="${A[4]:-}";     valid_label "$label"       || deny "bad label"
+    hostpub="${A[*]:5}";   [ -n "$hostpub" ]          || deny "missing host key"
     case "$hostpub" in ssh-ed25519\ *|ssh-rsa\ *|ecdsa-*\ *) ;; *) deny "bad host key" ;; esac
-    umask 077; mkdir -p "$SOCKDIR" 2>/dev/null   # metas are 0600 — pairing codes not world-readable
-    gc_dead "$bn"   # clear any stale leftovers for this name first
-    # refuse to clobber a session that is actually live (don't let a late/duplicate run hijack the meta)
-    socket_live "$SOCKDIR/$bn.sock" && deny "a live session already exists for $bn"
-    # The operator verifies the code out-of-band, so a racing rewrite of the meta only changes
-    # the code the operator sees — and a wrong code makes them abort, not connect.
+    umask 077; mkdir -p "$SOCKDIR" 2>/dev/null   # metas are 0600 — code hashes not world-readable
+    gc_dead "$sid"
+    socket_live "$SOCKDIR/$sid.sock" && deny "a live session already exists for that id"
     {
-      echo "botname=$bn"
-      echo "code=$code"
+      echo "sid=$sid"
+      echo "code=$ch"
       echo "loginuser=$loginuser"
+      echo "label=$label"
       echo "registered=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
       echo "peer=${SSH_CONNECTION%% *}"
       echo "hostkey=$hostpub"
-    } > "$SOCKDIR/$bn.meta.tmp" && mv "$SOCKDIR/$bn.meta.tmp" "$SOCKDIR/$bn.meta"
-    log "register $bn"
-    echo "registered $bn"
+    } > "$SOCKDIR/$sid.meta.tmp" && mv "$SOCKDIR/$sid.meta.tmp" "$SOCKDIR/$sid.meta"
+    log "register $sid ($label)"
+    echo "registered $sid"
+    ;;
+
+  resolve)
+    # code -> sid. Linear-scan live metas for a matching code hash; this IS the verification
+    # (only the genuine client registered that hash). Never echoes the code hash itself.
+    ch="${A[1]:-}"; valid_codehash "$ch" || deny "bad code hash"
+    shopt -s nullglob
+    for m in "$SOCKDIR"/*.meta; do
+      [ "$(sed -n 's/^code=//p' "$m")" = "$ch" ] || continue
+      sid="$(sed -n 's/^sid=//p' "$m")"
+      socket_live "$SOCKDIR/$sid.sock" || { gc_dead "$sid"; continue; }
+      echo "socket=live"
+      grep -vE '^(code|sid)=' "$m"   # loginuser, label, registered, peer, hostkey
+      echo "sid=$sid"
+      exit 0
+    done
+    deny "no live session for that code"
     ;;
 
   meta)
-    valid_botname "$bn" || deny "bad botname"
-    [ -f "$SOCKDIR/$bn.meta" ] || deny "no such session"
-    if socket_live "$SOCKDIR/$bn.sock"; then echo "socket=live"; else echo "socket=absent"; fi
-    grep -v '^code=' "$SOCKDIR/$bn.meta"   # never expose the code hash; verify it relay-side
-    ;;
-
-  verify)
-    valid_botname "$bn" || deny "bad botname"
-    [ -f "$SOCKDIR/$bn.meta" ] || deny "no such session"
-    want="$(sed -n 's/^code=//p' "$SOCKDIR/$bn.meta")"; got="${A[2]:-}"
-    if [ -n "$got" ] && [ "$got" = "$want" ]; then echo "match=yes"; else echo "match=no"; fi
+    sid="${A[1]:-}"; valid_sid "$sid" || deny "bad sid"
+    [ -f "$SOCKDIR/$sid.meta" ] || deny "no such session"
+    if socket_live "$SOCKDIR/$sid.sock"; then echo "socket=live"; else echo "socket=absent"; fi
+    grep -v '^code=' "$SOCKDIR/$sid.meta"
     ;;
 
   route)
-    valid_botname "$bn" || deny "bad botname"
-    socket_live "$SOCKDIR/$bn.sock" || { gc_dead "$bn"; deny "no live socket for $bn"; }
-    log "route $bn -> ${SSH_CONNECTION%% *}"
-    exec nc -U "$SOCKDIR/$bn.sock"
+    sid="${A[1]:-}"; valid_sid "$sid" || deny "bad sid"
+    socket_live "$SOCKDIR/$sid.sock" || { gc_dead "$sid"; deny "no live socket"; }
+    log "route $sid -> ${SSH_CONNECTION%% *}"
+    exec nc -U "$SOCKDIR/$sid.sock"
     ;;
 
   deregister)
-    valid_botname "$bn" || deny "bad botname"
-    rm -f "$SOCKDIR/$bn.sock" "$SOCKDIR/$bn.meta"
-    log "deregister $bn"
-    echo "deregistered $bn"
+    sid="${A[1]:-}"; valid_sid "$sid" || deny "bad sid"
+    rm -f "$SOCKDIR/$sid.sock" "$SOCKDIR/$sid.meta"
+    log "deregister $sid"
+    echo "deregistered $sid"
     ;;
 
   list)
     shopt -s nullglob
     for m in "$SOCKDIR"/*.meta; do
-      b="$(basename "${m%.meta}")"
-      if socket_live "$SOCKDIR/$b.sock"; then live="live"; else live="absent"; gc_dead "$b"; [ -f "$m" ] || continue; fi
-      reg="$(sed -n 's/^registered=//p' "$m")"
-      printf '%s\tsocket=%s\tregistered=%s\n' "$b" "$live" "$reg"
+      sid="$(sed -n 's/^sid=//p' "$m")"
+      if socket_live "$SOCKDIR/$sid.sock"; then live="live"; else live="absent"; gc_dead "$sid"; [ -f "$m" ] || continue; fi
+      label="$(sed -n 's/^label=//p' "$m")"; reg="$(sed -n 's/^registered=//p' "$m")"
+      printf '%s\tsocket=%s\tlabel=%s\tregistered=%s\n' "$sid" "$live" "$label" "$reg"
     done
     ;;
 

@@ -105,9 +105,10 @@ for i in $(seq 1 30); do [ -s "$WORK/client.pid" ] && break; sleep 0.1; done
 CLIENT_PID="$(cat "$WORK/client.pid" 2>/dev/null)"
 
 # wait for the reverse socket + the registration meta to appear
-for i in $(seq 1 50); do [ -S "$SOCK/testbot.sock" ] && [ -f "$SOCK/testbot.meta" ] && break; sleep 0.2; done
-[ -S "$SOCK/testbot.sock" ] && ok "client dialed out: reverse socket present on the relay" || { bad "no reverse socket"; cat "$WORK/client.log"; }
-[ -f "$SOCK/testbot.meta" ] && ok "client registered its pairing code + host key" || bad "no registration meta"
+for i in $(seq 1 50); do ls "$SOCK"/*.sock >/dev/null 2>&1 && ls "$SOCK"/*.meta >/dev/null 2>&1 && break; sleep 0.2; done
+SID="$(sed -n 's/^sid=//p' "$SOCK"/*.meta 2>/dev/null | head -1)"
+ls "$SOCK"/*.sock >/dev/null 2>&1 && ok "client dialed out: reverse socket present on the relay" || { bad "no reverse socket"; cat "$WORK/client.log"; }
+{ [ -n "$SID" ] && grep -q '^label=testbot' "$SOCK/$SID.meta"; } && ok "client registered (sid ${SID:0:8}…, label testbot) + host key" || bad "no registration meta"
 
 CODE=""; for i in $(seq 1 50); do CODE="$(grep -oE '[0-9A-F]{4}-[0-9A-F]{4}' "$WORK/client.log" | head -1)"; [ -n "$CODE" ] && break; sleep 0.2; done
 [ -n "$CODE" ] && ok "client displayed a pairing code ($CODE)" || bad "client showed no pairing code"
@@ -115,16 +116,16 @@ CODE=""; for i in $(seq 1 50); do CODE="$(grep -oE '[0-9A-F]{4}-[0-9A-F]{4}' "$W
 # ── 3. squatter / wrong-code is refused ──────────────────────────────────────────────────
 if env -i HOME="$OPHOME" PATH="$PATH" FLOO_HOME="$OPHOME/.config/floo" \
     FLOO_RELAY_HOST=127.0.0.1 FLOO_RELAY_PORT="$PORT" FLOO_RELAY_USER="$ME" \
-    "$REPO/bin/floo-powder" connect testbot --confirm 0000-0000 --no-shell >"$WORK/wrong.log" 2>&1; then
+    "$REPO/bin/floo-powder" connect --confirm 0000-0000 --no-shell >"$WORK/wrong.log" 2>&1; then
   bad "operator connect ACCEPTED a wrong pairing code (should refuse)"
 else
-  grep -qiE 'does not match|not this session|pairing code' "$WORK/wrong.log" && ok "operator refuses a wrong pairing code" || bad "wrong-code rejected but not via code check"
+  grep -qiE 'no live session|does not match|wrong code' "$WORK/wrong.log" && ok "operator refuses a wrong pairing code" || bad "wrong-code rejected but not via code check"
 fi
 
 # ── 4. operator connect with the correct code, then the bot exec (audit) path ────────────
 env -i HOME="$OPHOME" PATH="$PATH" FLOO_HOME="$OPHOME/.config/floo" \
     FLOO_RELAY_HOST=127.0.0.1 FLOO_RELAY_PORT="$PORT" FLOO_RELAY_USER="$ME" \
-    "$REPO/bin/floo-powder" connect testbot --confirm "$CODE" --no-shell >"$WORK/connect.log" 2>&1 \
+    "$REPO/bin/floo-powder" connect --confirm "$CODE" --no-shell >"$WORK/connect.log" 2>&1 \
   && ok "operator connect succeeded (code confirmed, cert minted, host key pinned)" \
   || { bad "operator connect failed"; cat "$WORK/connect.log"; }
 
@@ -149,7 +150,7 @@ ssh-keygen -t ed25519 -f "$WORK/rogue" -N '' -q
 if env -i PATH="$PATH" \
    ssh -F /dev/null -p "$PORT" -i "$WORK/rogue" -o IdentitiesOnly=yes -o BatchMode=yes \
        -o HostKeyAlias=rogue -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
-       -o ProxyCommand="ssh -F /dev/null -p $PORT -i $OPHOME/.config/floo/relay_id_ed25519 -o IdentitiesOnly=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null $ME@127.0.0.1 route testbot" \
+       -o ProxyCommand="ssh -F /dev/null -p $PORT -i $OPHOME/.config/floo/relay_id_ed25519 -o IdentitiesOnly=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null $ME@127.0.0.1 route $SID" \
        "$ME@placeholder" 'echo SHOULD_NOT_HAPPEN' >"$WORK/rogue.log" 2>&1; then
   bad "an un-certified key got a shell (CA gate broken!)"
 else

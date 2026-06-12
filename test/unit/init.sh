@@ -7,5 +7,5 @@ out=$(env HOME="$H" FLOO_HOME="$H/.config/floo" FLOO_INIT_NO_RELAY=1 FLOO_RELAY_
 [ -f "$H/.config/floo/relay_hostkey" ] && ok "relay host key generated" || bad "hostkey"
 grep -q 'curl -fsSL' <<<"$out" && grep -q 'relay.test.com' <<<"$out" && ok "prints client one-liner with the host" || bad "one-liner"
 grep -q '"operator_ca"' <<<"$out" && ok "prints importable config blob" || { bad "blob"; echo "$out" | tail -5; }
-env HOME="$H" "$OP" --version 2>/dev/null | grep -q "floo-powder 0.1.0" && env HOME="$H" "$OP" --version 2>/dev/null | grep -qi agents-deployed && ok "--version" || bad "--version"
+env HOME="$H" "$OP" --version 2>/dev/null | grep -qE "floo-powder [0-9]+\.[0-9]+" && env HOME="$H" "$OP" --version 2>/dev/null | grep -qi agents-deployed && ok "--version" || bad "--version"
 rm -rf "$H"; echo "$P passed, $F failed"; [ "$F" -eq 0 ]

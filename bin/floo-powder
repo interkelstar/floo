@@ -5,19 +5,20 @@
 # code); after that, plain `ssh <botname>` / `rsync <botname>:` work, and the bot can run
 # `floo-powder exec <botname> < script` for the read-only audit.
 #
+#   floo-powder [--relay H --pin FP] …  point at a relay you may not own (default: saved/local)
 #   floo-powder ca-init                 one-time: create the operator CA + relay key, wire ~/.ssh
 #   floo-powder invite                  print the client one-liner to hand off (uses the version tag)
 #   floo-powder list                    show client boxes with an open session
-#   floo-powder connect <botname>       verify the code, pin the host key, mint a 60-min cert, open a shell
+#   floo-powder connect <code>          resolve the code -> the session, mint a 60-min cert, open a shell
 #       [--confirm CODE]                   supply the code non-interactively (when already verified)
 #       [--no-shell]                       just establish the session (then use ssh/rsync/exec)
-#   floo-powder exec <botname>          run stdin on the box non-interactively (the bot/audit path)
-#   floo-powder close <botname>         tear down operator-side routing for a box
+#   floo-powder exec <handle>           run stdin on the box non-interactively (the bot/audit path)
+#   floo-powder close <handle>          tear down operator-side routing for a box
 #   floo-powder gc                      drop routing for sessions that are no longer live
 set -euo pipefail
 
 FLOO_HOME="${FLOO_HOME:-$HOME/.config/floo}"
-FLOO_VERSION="0.1.1"
+FLOO_VERSION="0.2.0"
 CA="$FLOO_HOME/ca/operator_ca"
 RELAY_KEY="$FLOO_HOME/relay_id_ed25519"      # operator's CLIENT key, to auth to the gw account
 RELAY_HOSTKEY="$FLOO_HOME/relay_hostkey"     # the relay's HOST key (pinned; deployed by install-relay.sh)
@@ -30,7 +31,7 @@ RELAY_USER="${FLOO_RELAY_USER:-${RELAY_USER:-gw}}"
 
 if [ -t 1 ]; then B=$'\e[1m'; D=$'\e[2m'; G=$'\e[32m'; Y=$'\e[33m'; R=$'\e[31m'; X=$'\e[0m'; else B="" D="" G="" Y="" R="" X=""; fi
 die() { printf '%serror:%s %s\n' "$R" "$X" "$*" >&2; exit 1; }
-valid_botname() { [[ "$1" =~ ^[a-z0-9][a-z0-9-]{0,62}$ ]] || die "bad botname: $1"; }
+valid_handle() { [[ "$1" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,62}$ ]] || die "bad session handle: $1"; }
 codehash() { printf '%s' "$1" | sha256sum | cut -c1-64; }
 
 ensure_ssh_wiring() {
@@ -78,55 +79,50 @@ cmd_list() {
 }
 
 cmd_connect() {
-  local bn="" confirm="" shell=1
+  local code="" shell=1
   while [ $# -gt 0 ]; do case "$1" in
-    --confirm) confirm="$2"; shift 2;;
+    --confirm) code="$2"; shift 2;;    # pre-supply the code (scripting / tests)
     --no-shell) shell=0; shift;;
     -*) die "unknown flag $1";;
-    *) bn="$1"; shift;;
+    *) code="$1"; shift;;
   esac; done
-  [ -n "$bn" ] || die "usage: floo-powder connect <botname>"
-  valid_botname "$bn"
-
-  local meta; meta="$(relay_ssh meta "$bn")" || die "no session for '$bn' on the relay (is it open?)"
-  grep -q '^socket=live' <<<"$meta" || die "'$bn' registered but its socket is not live — ask them to re-run support."
-  local hostkey loginuser
-  loginuser="$(sed -n 's/^loginuser=//p' <<<"$meta")"; loginuser="${loginuser:-$bn}"
-  hostkey="$(sed -n 's/^hostkey=//p' <<<"$meta" | awk '{print $1, $2}')"   # type+blob, drop comment
-  [ -n "$hostkey" ] || die "no host key in the relay record"
-
-  # ── the pairing-code gate: prove this socket is the client's real run, not a squatter ──
-  # We deliberately do NOT display the relay's code: you must obtain it from the CLIENT
-  # out-of-band and type it, so a squatter who registered a different code is caught. Seeing
-  # the relay's value first would let you rubber-stamp it.
-  # The code never leaves the client in clear: it registered sha256(code); we hash what you type
-  # and the relay compares hashes (so a leaked meta/list can't expose it). Never displayed — you
-  # must get it from the CLIENT out-of-band, so a squatter with a different code is caught.
-  local typed
-  if [ -n "$confirm" ]; then typed="$confirm"
-  else
+  if [ -z "$code" ]; then
     echo "${D}Ask the person you're helping to read you the pairing code on THEIR screen.${X}"
-    read -r -p "Code from the client's screen (blank to abort): " typed
-    [ -n "$typed" ] || die "aborted."
+    read -r -p "Pairing code (blank to abort): " code
+    [ -n "$code" ] || die "aborted."
   fi
-  [ "$(relay_ssh verify "$bn" "$(codehash "${typed^^}")")" = "match=yes" ] \
-    || die "pairing code does not match this session — DO NOT proceed (wrong box, or someone else answering)."
-  echo "${G}✓ code matches — this is the client's genuine session${X}"
+  # resolve the code -> the session. This IS the verification: only the genuine client registered
+  # that code, so a wrong code (or a squatter's different code) simply resolves to nothing.
+  local meta; meta="$(relay_ssh resolve "$(codehash "${code^^}")")" \
+    || die "no live session for that code — wrong code, or they closed the window."
+  local sid loginuser label hostkey
+  sid="$(sed -n 's/^sid=//p' <<<"$meta")"
+  loginuser="$(sed -n 's/^loginuser=//p' <<<"$meta")"
+  label="$(sed -n 's/^label=//p' <<<"$meta")"
+  hostkey="$(sed -n 's/^hostkey=//p' <<<"$meta" | awk '{print $1, $2}')"
+  { [ -n "$sid" ] && [ -n "$hostkey" ]; } || die "the relay returned an incomplete session record"
+  loginuser="${loginuser:-$label}"
+  echo "${G}✓ code matches — connected to the genuine session${X}"
+
+  # friendly handle: the client's label if it's free, else the sid (both unique on this operator box)
+  local handle="$sid"
+  [ -n "$label" ] && [ ! -e "$SSH_DROPIN_DIR/$label.conf" ] && handle="$label"
 
   ensure_ssh_wiring
-  local sdir="$FLOO_HOME/sessions/$bn"; rm -rf "$sdir"; mkdir -p "$sdir"; chmod 700 "$sdir"
-  printf '%s %s\n' "$bn" "$hostkey" > "$sdir/known_hosts"          # pin the client host key under the alias
-  ssh-keygen -t ed25519 -f "$sdir/opkey" -N '' -q -C "op-$bn"
-  ssh-keygen -s "$CA" -I "op-$bn-$(date -u +%Y%m%dT%H%M%SZ)" -n "$bn" -V +60m "$sdir/opkey.pub" >/dev/null
-  echo "${D}minted a 60-minute certificate (principal=$bn)${X}"
+  local sdir="$FLOO_HOME/sessions/$handle"; rm -rf "$sdir"; mkdir -p "$sdir"; chmod 700 "$sdir"
+  printf '%s %s
+' "$handle" "$hostkey" > "$sdir/known_hosts"          # pin the client host key under the alias
+  ssh-keygen -t ed25519 -f "$sdir/opkey" -N '' -q -C "op-$sid"
+  ssh-keygen -s "$CA" -I "op-$sid-$(date -u +%Y%m%dT%H%M%SZ)" -n "$sid" -V +60m "$sdir/opkey.pub" >/dev/null
+  echo "${D}minted a 60-minute certificate (principal=$sid)${X}"
 
-  cat > "$SSH_DROPIN_DIR/$bn.conf" <<CONF
-# floo-powder session for $bn — auto-managed, expires with the cert (≤60m). Safe to delete.
-Host $bn
-    HostName $bn
-    HostKeyAlias $bn
+  cat > "$SSH_DROPIN_DIR/$handle.conf" <<CONF
+# floo-powder session $handle (sid $sid) — auto-managed, expires with the cert (≤60m). Safe to delete.
+Host $handle
+    HostName $handle
+    HostKeyAlias $handle
     User $loginuser
-    ProxyCommand ssh -p "$RELAY_PORT" -i "$RELAY_KEY" -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile="$FLOO_HOME/relay_known_hosts" "$RELAY_USER@$RELAY_HOST" route "$bn"
+    ProxyCommand ssh -p "$RELAY_PORT" -i "$RELAY_KEY" -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile="$FLOO_HOME/relay_known_hosts" "$RELAY_USER@$RELAY_HOST" route "$sid"
     IdentityFile "$sdir/opkey"
     CertificateFile "$sdir/opkey-cert.pub"
     IdentitiesOnly yes
@@ -134,24 +130,25 @@ Host $bn
     StrictHostKeyChecking yes
     RequestTTY auto
 CONF
-  chmod 600 "$SSH_DROPIN_DIR/$bn.conf"
-  echo "${G}✓ session ready${X} — plain ${B}ssh $bn${X} / ${B}rsync … $bn:${X} now work (≤60 min)."
-  if [ "$shell" = 1 ]; then echo "${D}opening a shell… (they can watch via 'floo --watch')${X}"; exec ssh "$bn"; fi
+  chmod 600 "$SSH_DROPIN_DIR/$handle.conf"
+  echo "${G}✓ session ready${X} — ${B}ssh $handle${X} / ${B}rsync … $handle:${X} / ${B}floo-powder exec $handle${X} (≤60 min)"
+  if [ "$shell" = 1 ]; then echo "${D}opening a shell… (they can watch via 'floo --watch')${X}"; exec ssh "$handle"; fi
 }
 
+
 cmd_exec() {
-  local bn="${1:-}"; [ -n "$bn" ] || die "usage: floo-powder exec <botname> < script"
-  valid_botname "$bn"
-  [ -f "$SSH_DROPIN_DIR/$bn.conf" ] || die "no active session for '$bn' — run 'floo-powder connect $bn' first."
+  local h="${1:-}"; [ -n "$h" ] || die "usage: floo-powder exec <handle> < script"
+  valid_handle "$h"
+  [ -f "$SSH_DROPIN_DIR/$h.conf" ] || die "no active session '$h' — run 'floo-powder connect <code>' first."
   # the bot/audit path: feed a script over a non-interactive shell. Recorded on the client side.
-  ssh -o BatchMode=yes "$bn" 'bash -s'
+  ssh -o BatchMode=yes "$h" 'bash -s'
 }
 
 cmd_close() {
-  local bn="${1:-}"; [ -n "$bn" ] || die "usage: floo-powder close <botname>"
-  valid_botname "$bn"
-  rm -f "$SSH_DROPIN_DIR/$bn.conf"; rm -rf "$FLOO_HOME/sessions/$bn"
-  echo "closed operator-side routing for '$bn' (the client's Ctrl-C is the real revoke)."
+  local h="${1:-}"; [ -n "$h" ] || die "usage: floo-powder close <handle>"
+  valid_handle "$h"
+  rm -f "$SSH_DROPIN_DIR/$h.conf"; rm -rf "$FLOO_HOME/sessions/$h"
+  echo "closed operator-side routing for '$h' (the client's Ctrl-C is the real revoke)."
 }
 
 cmd_gc() {
@@ -215,6 +212,30 @@ cmd_install() {
   echo "linked floo-powder${client:+ + floo} into $dst"
   case ":$PATH:" in *":$dst:"*) ;; *) echo "note: add $dst to your PATH (e.g. in ~/.zshrc)";; esac
 }
+
+# verify a relay against a short pin (symmetric with the client's --pin) and save it.
+verify_relay_pin() {
+  local scanned blob got rt
+  scanned="$(ssh-keyscan -t ed25519 -p "$RELAY_PORT" "$RELAY_HOST" 2>/dev/null)"
+  blob="$(awk '{for(i=1;i<=NF;i++) if($i=="ssh-ed25519"){print $(i+1); exit}}' <<<"$scanned")"
+  [ -n "$blob" ] || die "could not reach the relay at $RELAY_HOST:$RELAY_PORT to verify the pin."
+  got="$(printf '%s' "$blob" | base64 -d 2>/dev/null | sha256sum | cut -c1-16)"
+  [ "$got" = "$FLOO_RELAY_PIN" ] || die "relay fingerprint ($got) does not match the pin ($FLOO_RELAY_PIN) — refusing."
+  mkdir -p "$FLOO_HOME"; chmod 700 "$FLOO_HOME"
+  if [ "$RELAY_PORT" = 22 ]; then rt="$RELAY_HOST"; else rt="[$RELAY_HOST]:$RELAY_PORT"; fi
+  printf '%s ssh-ed25519 %s\n' "$rt" "$blob" > "$FLOO_HOME/relay_known_hosts"
+  { echo "RELAY_HOST=$RELAY_HOST"; echo "RELAY_PORT=$RELAY_PORT"; } > "$FLOO_HOME/relay.env"
+  echo "${G}✓ relay $RELAY_HOST pinned and saved${X}"
+}
+
+# leading --relay/--pin: point floo-powder at a relay you may not own, exactly like the client does
+FLOO_RELAY_PIN="${FLOO_RELAY_PIN:-}"
+while [ $# -gt 0 ]; do case "$1" in
+  --relay) RELAY_HOST="${2%%:*}"; case "$2" in *:*) RELAY_PORT="${2##*:}";; esac; shift 2;;
+  --pin)   FLOO_RELAY_PIN="$2"; shift 2;;
+  *) break;;
+esac; done
+[ -n "$FLOO_RELAY_PIN" ] && verify_relay_pin
 
 case "${1:-}" in
   install) shift; cmd_install "$@";;

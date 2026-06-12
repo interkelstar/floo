@@ -1,4 +1,12 @@
 # Changelog
+## 0.2.0 — 2026-06-12 (breaking: relay protocol)
+- connect by CODE, not name: `floo-powder connect <code>`. Sessions key on a random non-secret sid;
+  the operator resolves the code → sid → certs against it. No more name collisions across a fleet.
+- the name survives only as an optional display **label** (agents-deployed keeps `ssh vital`).
+- `floo-powder --relay <host> --pin <fp>`: point the operator at a relay you may not own, symmetric
+  with the client — enables relay-on-a-separate-box and the two-friends topology.
+- relay: `resolve` replaces `verify`; register/route/meta/deregister key on the sid; list shows the label.
+
 ## 0.1.1 — 2026-06-12
 - recorder: set XDG_RUNTIME_DIR so `systemctl --user`/`journalctl --user` work over `exec`
 - recorder: pass rsync/scp through a clean binary channel (was deadlocking + corrupting the protocol); the transfer is recorded as the command, not the byte stream

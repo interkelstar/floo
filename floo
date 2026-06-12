@@ -31,7 +31,7 @@
 set -uo pipefail
 umask 077   # everything we create (keys, config, recordings) is owner-only from birth
 
-FLOO_VERSION="0.1.1"
+FLOO_VERSION="0.2.0"
 
 # ─── The disclosure: the ONLY key that can enter. Public by design. ──────────────────────
 # This is a *public* key. Publishing it is safe and is the whole point: you read it and
@@ -111,7 +111,7 @@ snapshot_surface() {
 }
 
 # ─── Build the throwaway SSH endpoint (in tmpfs; nothing on durable disk). ────────────────
-WORKDIR=""; SSHD_PID=""; TUNNEL_PID=""; MONITOR_PID=""; NAME=""; SSHD_PORT=""
+WORKDIR=""; SSHD_PID=""; TUNNEL_PID=""; MONITOR_PID=""; NAME=""; SID=""; SSHD_PORT=""
 PAIRCODE=""; BEFORE=""; AFTER=""; CONNECT_LOGGED=0
 
 build_endpoint() {
@@ -129,7 +129,8 @@ build_endpoint() {
     warn "relay host key not pinned. Pass --relay-hostkey, import an operator config, or set FLOO_ALLOW_TOFU=1 to accept trust-on-first-use. Refusing."
     exit 1
   fi
-  printf '%s\n' "$NAME" > "$WORKDIR/principals"      # the cert principal we will accept
+  SID="$(head -c8 /dev/urandom | od -An -tx1 | tr -d ' \n')"   # random, non-secret session id: routing + cert principal
+  printf '%s\n' "$SID" > "$WORKDIR/principals"      # the cert principal we will accept (the sid, not the name)
   ssh-keygen -t ed25519 -f "$WORKDIR/hostkey" -N '' -q -C "floo-$NAME"
 
   # the recorder: every command the operator runs, and its output, is teed to your disk.
@@ -294,7 +295,7 @@ register_and_tunnel() {
   local hostpub; hostpub="$(cat "$WORKDIR/hostkey.pub")"
 
   info "registering the session with the relay…"
-  if ! relay_ssh register "$NAME" "$(codehash "$PAIRCODE")" "$(id -un)" "$hostpub"; then
+  if ! relay_ssh register "$SID" "$(codehash "$PAIRCODE")" "$(id -un)" "$NAME" "$hostpub"; then
     warn "could not reach the relay at $FLOO_RELAY_HOST:$FLOO_RELAY_PORT — is the network up?"
     return 1
   fi
@@ -307,7 +308,7 @@ register_and_tunnel() {
       -o ServerAliveInterval=15 -o ServerAliveCountMax=3 \
       -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile="$WORKDIR/relay_known_hosts" \
       -i "$WORKDIR/clientkey" \
-      -R "$FLOO_RELAY_SOCK_DIR/$NAME.sock:127.0.0.1:$SSHD_PORT" \
+      -R "$FLOO_RELAY_SOCK_DIR/$SID.sock:127.0.0.1:$SSHD_PORT" \
       "$FLOO_RELAY_USER@$FLOO_RELAY_HOST" &
   TUNNEL_PID=$!
   sleep 1.2
@@ -448,7 +449,7 @@ teardown() {
 
   # tidy up the relay: drop our (now-dead) socket + registration. Best-effort.
   local dereg_ok=0
-  [ -f "$WORKDIR/clientkey" ] && relay_ssh deregister "$NAME" >/dev/null 2>&1 && dereg_ok=1
+  [ -f "$WORKDIR/clientkey" ] && relay_ssh deregister "$SID" >/dev/null 2>&1 && dereg_ok=1
 
   # THE REVOKE is the local endpoint being down — that, not the relay socket, is the access path.
   # Confirm it, retrying a harder kill if needed; only then claim revoked.
@@ -647,7 +648,7 @@ main() {
     --show-operator) mode=showop; shift;;
     *) warn "unknown option: $1"; usage; exit 1;;
   esac; done
-  NAME="$(resolve_name)"
+  NAME="$(resolve_name | tr -cd 'A-Za-z0-9._-' | cut -c1-63)"; [ -n "$NAME" ] || NAME="floohost"
   [ "$mode" = printname ] && { printf '%s\n' "$NAME"; exit 0; }
   if [ -z "$FLOO_RELAY_HOST" ] || [ -z "$FLOO_OPERATOR_CA" ]; then load_operator "$operator" || true; fi
   if [ -n "$FLOO_RELAY_PIN" ] && [ -z "$FLOO_OPERATOR_CA" ] && [ -n "$FLOO_RELAY_HOST" ]; then bootstrap_from_relay; fi
