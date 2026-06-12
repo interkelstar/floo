@@ -6,6 +6,7 @@
 # `floo-powder exec <botname> < script` for the read-only audit.
 #
 #   floo-powder ca-init                 one-time: create the operator CA + relay key, wire ~/.ssh
+#   floo-powder invite                  print the client one-liner to hand off (uses the version tag)
 #   floo-powder list                    show client boxes with an open session
 #   floo-powder connect <botname>       verify the code, pin the host key, mint a 60-min cert, open a shell
 #       [--confirm CODE]                   supply the code non-interactively (when already verified)
@@ -23,7 +24,7 @@ RELAY_HOSTKEY="$FLOO_HOME/relay_hostkey"     # the relay's HOST key (pinned; dep
 SSH_DROPIN_DIR="$HOME/.ssh/floo.d"
 SELF="$(readlink -f "$0" 2>/dev/null || echo "$0")"; SD="$(cd "$(dirname "$SELF")" && pwd)"
 [ -f "$FLOO_HOME/relay.env" ] && . "$FLOO_HOME/relay.env"
-RELAY_HOST="${FLOO_RELAY_HOST:-${RELAY_HOST:-relay.agents-deployed.com}}"
+RELAY_HOST="${FLOO_RELAY_HOST:-${RELAY_HOST:-}}"        # set by relay.env (written by init) or FLOO_RELAY_HOST
 RELAY_PORT="${FLOO_RELAY_PORT:-${RELAY_PORT:-443}}"
 RELAY_USER="${FLOO_RELAY_USER:-${RELAY_USER:-gw}}"
 
@@ -163,6 +164,24 @@ cmd_gc() {
   echo "gc done."
 }
 
+relay_pin() {
+  local hk; hk="$(cat /etc/floo/relay_hostkey.pub 2>/dev/null || cat "$RELAY_HOSTKEY.pub" 2>/dev/null)"
+  [ -n "$hk" ] || return 1
+  printf '%s' "$(awk '{print $2}' <<<"$hk")" | base64 -d 2>/dev/null | sha256sum | cut -c1-16
+}
+print_oneliner() {
+  local host="$1" port="$2" ref="${FLOO_PIN_COMMIT:-v$FLOO_VERSION}" pin relayarg
+  pin="$(relay_pin)" || die "no relay host key yet — run 'floo-powder init' first."
+  relayarg="$host"; [ "$port" = 443 ] || relayarg="$host:$port"
+  echo "curl -fsSL https://raw.githubusercontent.com/interkelstar/floo/$ref/floo | bash -s -- --relay $relayarg --pin $pin"
+}
+cmd_invite() {
+  local host="${FLOO_RELAY_PUBLIC_HOST:-$RELAY_HOST}" port="${FLOO_RELAY_PORT:-$RELAY_PORT}"
+  [ -n "$host" ] || die "unknown relay host — run 'floo-powder init' (or set FLOO_RELAY_PUBLIC_HOST)."
+  echo "${B}── give this to the person you're helping (they run it, read you the code) ──${X}"
+  print_oneliner "$host" "$port"
+}
+
 cmd_init() {
   cmd_ca_init >/dev/null
   local host="${FLOO_RELAY_PUBLIC_HOST:-$(curl -fsS --max-time 5 ifconfig.me 2>/dev/null)}"
@@ -172,17 +191,16 @@ cmd_init() {
     echo "standing up the relay on this box (sudo)…"
     sudo "$SD/../relay/install-relay.sh" || die "relay install failed"
   fi
+  # persist the public relay host so 'invite' and the operator CLI reuse it
+  { grep -vE '^RELAY_(HOST|PORT)=' "$FLOO_HOME/relay.env" 2>/dev/null; echo "RELAY_HOST=$host"; echo "RELAY_PORT=$port"; } > "$FLOO_HOME/relay.env.tmp" && mv "$FLOO_HOME/relay.env.tmp" "$FLOO_HOME/relay.env"
   local ca hk; ca="$(cat "$CA.pub")"
-  # prefer the ACTUAL deployed relay host key (what clients will pin); fall back to the operator's
   hk="$(cat /etc/floo/relay_hostkey.pub 2>/dev/null || cat "$RELAY_HOSTKEY.pub")"
-  local commit="${FLOO_PIN_COMMIT:-main}"
-  local pin; pin="$(printf '%s' "$(awk '{print $2}' <<<"$hk")" | base64 -d 2>/dev/null | sha256sum | cut -c1-16)"
-  local relayarg="$host"; [ "$port" = 443 ] || relayarg="$host:$port"
   echo
   echo "${B}── one-time client one-liner (share this — short, paste-safe) ──${X}"
-  echo "curl -fsSL https://raw.githubusercontent.com/interkelstar/floo/$commit/floo | bash -s -- --relay $relayarg --pin $pin"
+  print_oneliner "$host" "$port"
   echo
-  echo "${D}(the client verifies the relay against the pin, then fetches the operator key from it — no keys to paste)${X}"
+  echo "${D}(client verifies the relay via the pin, then fetches the operator key from it — nothing to paste)${X}"
+  echo "${D}reprint anytime with:  floo-powder invite${X}"
   echo
   echo "${B}── or an importable config blob (for repeat support: floo config import) ──${X}"
   printf '{"name":"%s","relay_host":"%s","relay_port":"%s","operator_ca":"%s","relay_hostkey":"%s"}\n' \
@@ -201,6 +219,7 @@ cmd_install() {
 case "${1:-}" in
   install) shift; cmd_install "$@";;
   init)    shift; cmd_init "$@";;
+  invite)  shift; cmd_invite "$@";;
   ca-init) shift; cmd_ca_init "$@";;
   list)    shift; cmd_list "$@";;
   connect) shift; cmd_connect "$@";;
