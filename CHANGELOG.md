@@ -1,4 +1,19 @@
 # Changelog
+## 0.4.0 — 2026-06-12
+- **no-cert (quick) mode** — a client can open a code-only session that any operator takes with just the
+  code, no operator CA. `floo --public` stands up a CA-less throwaway sshd (empty authorized_keys), shows a
+  high-entropy base32 code, then polls the relay for the operator's ephemeral-key bind and authorizes the
+  first whose `HMAC(code, opkey)` verifies. The code IS the credential against an untrusted relay → it's
+  long (~65 bits). Strictly weaker than CA mode (a leaked code = access) and opt-in on every side.
+- **operator auto-detects the mode**: `floo-powder connect <code>` resolves the session, reads its `quick`
+  flag, and either mints a CA cert (CA mode) or binds an ephemeral key by code-proof (no-cert) — no new flag.
+- **relay**: new `bindop`/`getop` verbs (store-all binds; the client filters by HMAC, so a junk bind can't
+  squat a session); `register` carries an optional `quick=1`; opt-in via `install-relay.sh --allow-quick`
+  (writes `/etc/floo/allow_quick`; default stays CA-only). New caps under allow-quick: max concurrent quick
+  sessions (`FLOO_QUICK_MAX=20`) + a quick TTL (`FLOO_QUICK_TTL=1800s`). Per-IP throttling is the existing
+  sshd `PerSourceMaxStartups`/`MaxAuthTries` + fail2ban (each register/bindop is a fresh gw handshake).
+- The same relay serves both modes; routing (sid-keyed) is shared, only the auth binding differs.
+
 ## 0.3.2 — 2026-06-12
 - `floo-powder relay-install`: stand up / refresh the relay daemon from the operator keys already in
   `~/.config/floo` (CA + relay host key), reusing the host key so the pin is unchanged. Idempotent;

@@ -70,7 +70,7 @@ nothing else to clone and you can audit exactly what gets root. Fetch it, read i
 your relay:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/interkelstar/floo/v0.3.2/bin/floo-powder -o floo-powder
+curl -fsSL https://raw.githubusercontent.com/interkelstar/floo/v0.4.0/bin/floo-powder -o floo-powder
 less floo-powder                     # read it — incl. the embedded relay that `init` sudo-runs, inline + readable
 sh floo-powder install               # install into ~/.local/bin (self-fetches if piped)
 floo-powder init                     # turnkey: keys + stands up the embedded relay + prints the client one-liner
@@ -100,6 +100,29 @@ leftovers (only your `~/.config/floo` keys stay — back those up, they *are* yo
 > **Developing floo?** `git clone … && cd floo && bin/floo-powder install` works too — `init` then uses
 > the live `relay/` files instead of the embedded copy. After editing anything under `relay/`, run
 > `scripts/embed.sh` to re-embed it into `bin/floo-powder` (the test suite's `embed.sh --check` fails on drift).
+
+## No-cert ("quick") mode — code-only, no CA
+
+For a one-off where there's no operator relationship — TeamViewer-style "just help me right now" — a client can
+open a session that **any** operator takes with only a code, no CA:
+
+```bash
+# relay (opt-in — turns the relay into an open rendezvous broker for code-only sessions):
+sudo ./install-relay.sh --allow-quick        # default install stays CA-only
+
+# client:
+floo --public --relay <host> --pin <fp>      # shows a long base32 code; no operator CA needed
+
+# operator (no new flag — connect auto-detects the mode from the session):
+floo-powder --relay <host> --pin <fp> connect <code>
+```
+
+In this mode **the code IS the credential** (it's long — ~65 bits — on purpose): the client authorizes the
+single operator key whose `HMAC(code, key)` matches, so only the code-holder gets in, and a junk bind can't
+squat the session. This is **strictly weaker than CA mode** — anyone who learns the code can connect — so it's
+**opt-in on every side** and CA mode stays the default. Recording, state-diff, and Ctrl-C = revoke are unchanged.
+Caps under `--allow-quick`: max concurrent quick sessions + a short session TTL (per-IP throttling is the relay
+sshd's existing per-source limits + fail2ban).
 
 ## How it works
 
