@@ -1,4 +1,15 @@
 # Changelog
+## 0.3.0 — 2026-06-12
+- self-contained operator: `floo-powder` is now a single file with the relay (`floo-route`,
+  `floo-authkeys`, `install-relay.sh`) embedded — no git clone needed. Operator onboarding is
+  symmetric with the client: `curl …/bin/floo-powder -o floo-powder && sh floo-powder install && floo-powder init`
+  (or `curl … | bash -s -- init`). `init` materializes the embedded relay when run standalone, or uses
+  the live `relay/` files from a checkout.
+- `floo-powder install` self-fetches the pinned tag when run piped (no on-disk file to symlink).
+- `floo-powder relay-extract <dir>` writes the embedded relay scripts out (transparency / inspection).
+- build: `scripts/embed.sh` regenerates the embedded payload from `relay/` (base64, drift-checked);
+  `test/unit/embed.sh` (`embed.sh --check`) fails the suite if a `relay/` file is edited without re-embedding.
+
 ## 0.2.0 — 2026-06-12 (breaking: relay protocol)
 - connect by CODE, not name: `floo-powder connect <code>`. Sessions key on a random non-secret sid;
   the operator resolves the code → sid → certs against it. No more name collisions across a fleet.

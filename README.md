@@ -64,11 +64,19 @@ is that it runs as *your* user, is recorded, and any change to your access surfa
 
 ## For the operator
 
-```sh
-git clone https://github.com/interkelstar/floo && cd floo
-bin/floo-powder install                  # symlink floo-powder (+ floo) into ~/.local/bin — then drop the bin/ prefix
-floo-powder init                         # turnkey: keys + relay + prints the client one-liner
+`floo-powder` is **one self-contained file** — the relay (`floo-route` + its installer) is embedded, so
+there's nothing else to clone. Fetch it, read it, install it, and stand up your relay:
 
+```sh
+curl -fsSL https://raw.githubusercontent.com/interkelstar/floo/v0.3.0/bin/floo-powder -o floo-powder
+less floo-powder                     # read exactly what you're about to run
+sh floo-powder install               # install into ~/.local/bin (self-fetches if piped)
+floo-powder init                     # turnkey: keys + stands up the embedded relay + prints the client one-liner
+```
+
+(One-shot, no install: `curl -fsSL https://…/bin/floo-powder | bash -s -- init`.)
+
+```sh
 floo-powder invite                   # reprint the one-liner to hand to whoever you're helping
 floo-powder connect <code>           # the CODE the client reads you — resolves the session, you're in
 floo-powder exec <handle> < audit.sh # run a script non-interactively (recorded on the client)
@@ -83,6 +91,10 @@ floo-powder --relay vps.example.com --pin <fp> connect <code>
 relay is a dedicated, isolated `sshd` serving a single powerless `gw` account; it splices ciphertext and
 never sees your session. Cross-distro (Fedora/Debian/Ubuntu/Arch/Alpine); `--uninstall` leaves **zero**
 leftovers (only your `~/.config/floo` keys stay — back those up, they *are* your access).
+
+> **Developing floo?** `git clone … && cd floo && bin/floo-powder install` works too — `init` then uses
+> the live `relay/` files instead of the embedded copy. After editing anything under `relay/`, run
+> `scripts/embed.sh` to re-embed it into `bin/floo-powder` (the test suite's `embed.sh --check` fails on drift).
 
 ## How it works
 
