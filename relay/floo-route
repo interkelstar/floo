@@ -114,6 +114,7 @@ case "$cmd" in
     shopt -s nullglob
     for m in "$SOCKDIR"/*.meta; do
       sid="$(sed -n 's/^sid=//p' "$m")"
+      [ -n "$sid" ] || { rm -f "$m"; continue; }   # skip/clear any pre-v0.2 (nameless) meta
       if socket_live "$SOCKDIR/$sid.sock"; then live="live"; else live="absent"; gc_dead "$sid"; [ -f "$m" ] || continue; fi
       label="$(sed -n 's/^label=//p' "$m")"; reg="$(sed -n 's/^registered=//p' "$m")"
       printf '%s\tsocket=%s\tlabel=%s\tregistered=%s\n' "$sid" "$live" "$label" "$reg"
