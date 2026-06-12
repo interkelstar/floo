@@ -18,5 +18,8 @@ bash "$DIR/loopback.sh" || rc=1
 echo; echo "########## loopback B: technician changes a surface (disclosure must fire) ##########"
 FLOO_INJECT_CHANGE=1 bash "$DIR/loopback.sh" || rc=1
 
+echo; echo "########## quick loopback: no-cert (code-only) session ##########"
+bash "$DIR/quick-loopback.sh" || rc=1
+
 echo; [ "$rc" = 0 ] && echo "ALL TESTS PASSED" || echo "SOME TESTS FAILED"
 exit $rc
