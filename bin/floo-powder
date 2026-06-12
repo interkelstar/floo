@@ -177,9 +177,10 @@ cmd_init() {
   hk="$(cat /etc/floo/relay_hostkey.pub 2>/dev/null || cat "$RELAY_HOSTKEY.pub")"
   local commit="${FLOO_PIN_COMMIT:-main}"
   local pin; pin="$(printf '%s' "$(awk '{print $2}' <<<"$hk")" | base64 -d 2>/dev/null | sha256sum | cut -c1-16)"
+  local relayarg="$host"; [ "$port" = 443 ] || relayarg="$host:$port"
   echo
   echo "${B}── one-time client one-liner (share this — short, paste-safe) ──${X}"
-  echo "curl -fsSL https://raw.githubusercontent.com/interkelstar/floo/$commit/floo | bash -s -- --relay $host:$port --pin $pin"
+  echo "curl -fsSL https://raw.githubusercontent.com/interkelstar/floo/$commit/floo | bash -s -- --relay $relayarg --pin $pin"
   echo
   echo "${D}(the client verifies the relay against the pin, then fetches the operator key from it — no keys to paste)${X}"
   echo
