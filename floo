@@ -612,6 +612,10 @@ main() {
   NAME="$(resolve_name)"
   [ "$mode" = printname ] && { printf '%s\n' "$NAME"; exit 0; }
   if [ -z "$FLOO_RELAY_HOST" ] || [ -z "$FLOO_OPERATOR_CA" ]; then load_operator "$operator" || true; fi
+  # paste-safety: a terminal can fold a long --operator-ca/--relay-hostkey onto multiple lines
+  # (newline+indent), which corrupts the key. Collapse inserted whitespace back to "type blob comment".
+  FLOO_OPERATOR_CA="$(printf '%s' "$FLOO_OPERATOR_CA" | tr '\n\r\t' '   ' | tr -s ' ' | sed 's/^ *//;s/ *$//')"
+  FLOO_RELAY_HOSTKEY="$(printf '%s' "$FLOO_RELAY_HOSTKEY" | tr '\n\r\t' '   ' | tr -s ' ' | sed 's/^ *//;s/ *$//')"
   [ "$mode" = showop ] && { printf 'relay=%s:%s\n' "$FLOO_RELAY_HOST" "$FLOO_RELAY_PORT"; exit 0; }
   case "$mode" in
     watch) watch_attach;;
