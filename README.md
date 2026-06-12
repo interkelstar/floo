@@ -70,10 +70,13 @@ bin/floo-powder install                  # symlink floo-powder (+ floo) into ~/.
 floo-powder init                         # turnkey: keys + relay + prints the client one-liner
 
 floo-powder invite                   # reprint the one-liner to hand to whoever you're helping
-floo-powder list                     # clients with an open session
-floo-powder connect <name>           # type the code the CLIENT reads you, get a shell
-floo-powder exec <name> < audit.sh   # run a script non-interactively (recorded on the client)
-floo-powder close <name>             # drop operator-side routing
+floo-powder connect <code>           # the CODE the client reads you — resolves the session, you're in
+floo-powder exec <handle> < audit.sh # run a script non-interactively (recorded on the client)
+floo-powder close <handle>           # drop operator-side routing
+floo-powder list                     # open sessions (label + id) — situational; you connect by code
+
+# point at a relay you don't own (relay on a separate box, a friend's relay):
+floo-powder --relay vps.example.com --pin <fp> connect <code>
 ```
 
 `floo-powder init` prints the exact one-liner (and an importable config blob) to hand to clients. The
@@ -83,10 +86,12 @@ leftovers (only your `~/.config/floo` keys stay — back those up, they *are* yo
 
 ## How it works
 
-`floo` (client) dials out to your relay and opens a cert-only throwaway `sshd`; `floo-powder connect`
-verifies the pairing code (you type what the client reads, never seeing the relay's copy — so a squatter
-is caught), pins the relay + client host keys, mints a ≤60-min cert, and connects end-to-end *through* the
-relay to the client's own endpoint. Recording + before/after state-diff; Ctrl-C/close = full teardown.
+`floo` (client) dials out to your relay and opens a cert-only throwaway `sshd`, registering under a random
+session id with a one-time **code** it shows the client. `floo-powder connect <code>` resolves that code to
+the session — so you reach the *genuine* client by construction (a squatter registered a different code, so
+your code never resolves to them), with no name to collide across a fleet. It pins the relay + client host
+keys, mints a ≤60-min cert (bound to that session id), and connects end-to-end *through* the relay.
+Recording + before/after state-diff; Ctrl-C/close = full teardown.
 
 Design & threat model: [`docs/DESIGN.md`](docs/DESIGN.md), [`docs/THREAT-MODEL.md`](docs/THREAT-MODEL.md).
 Tests: `bash test/run-all.sh` (unit + a full single-host loopback proving cert-only entry, the
