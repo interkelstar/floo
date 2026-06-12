@@ -96,7 +96,21 @@ else
   ok "operator connect with a wrong code fails to authorize"
 fi
 
-# ── the CORRECT code: operator auto-detects quick, binds an ephemeral key, gets in ──
+# ── ADVERSARIAL: a griefer who knows the SID (via 'list') binds a junk auth FIRST. The store-all design
+#    means the client must SKIP it (HMAC fails) and never authorize it — so the legit operator still gets in. ──
+JUNK_AUTH="$(printf '%064d' 0 | tr 0 a)"   # 64 hex, will never equal HMAC(realcode, junkkey)
+ssh -p "$PORT" -i "$OPHOME/.config/floo/relay_id_ed25519" -o IdentitiesOnly=yes -o BatchMode=yes \
+    -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "$ME@127.0.0.1" \
+    bindop "$SID" "$JUNK_AUTH" "ssh-ed25519 AAAAgrieferpubkeyblob grief" >/dev/null 2>&1 \
+  && note "injected a junk griefer bind for $SID" || note "griefer bind call returned nonzero (still stored if quick on)"
+sleep 3   # give the client's bind_watcher (2s poll) a cycle to see + reject the junk bind
+if [ -s "$RUN/floo/qbox/authorized_keys" ]; then
+  bad "client authorized a junk griefer bind (store-all skip broken — DoS/again open)"
+else
+  ok "client refused the junk griefer bind (authorized_keys still empty — HMAC skip works)"
+fi
+
+# ── the CORRECT code: operator auto-detects quick, binds an ephemeral key, gets in (past the griefer) ──
 env -i HOME="$OPHOME" PATH="$PATH" FLOO_HOME="$OPHOME/.config/floo" \
     FLOO_RELAY_HOST=127.0.0.1 FLOO_RELAY_PORT="$PORT" FLOO_RELAY_USER="$ME" \
     "$REPO/bin/floo-powder" connect --confirm "$CODE" --no-shell >"$WORK/connect.log" 2>&1 \

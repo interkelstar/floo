@@ -98,6 +98,26 @@ SSH_ORIGINAL_COMMAND="bindop $QSID $AUTH $OPKEY" SSH_CONNECTION="1.2.3.4 5 6 7" 
   FLOO_ALLOW_QUICK_FILE=/nonexistent bash "$ROUTE" >/dev/null 2>&1 \
   && bad "bindop accepted with allow-quick OFF" || ok "bindop refused when allow-quick is off"
 
+# CAP — max-concurrent: with QSID already live and FLOO_QUICK_MAX=1, a 2nd quick register is refused
+QSID2="c1c2c3c4c5c6c7c8"; QCH2="$(printf '%s' "OTHER-CODE" | sha256sum | cut -c1-64)"
+SSH_ORIGINAL_COMMAND="register $QSID2 $QCH2 kelstar qbox2 quick=1 $OPKEY" SSH_CONNECTION="1.2.3.4 5 6 7" \
+  FLOO_ALLOW_QUICK_FILE="$ALLOWQ" FLOO_QUICK_MAX=1 bash "$ROUTE" >/dev/null 2>&1 \
+  && bad "max-concurrent cap not enforced" || ok "max-concurrent quick cap refuses a 2nd live session"
+
+# CAP — TTL: a quick meta with an ancient registered_epoch is pruned on the next scan (no socket needed)
+TSID="d1d2d3d4d5d6d7d8"
+{ echo "sid=$TSID"; echo "code=$QCH2"; echo "loginuser=kelstar"; echo "label=tbox"; echo "quick=1"
+  echo "registered=old"; echo "registered_epoch=1"; echo "peer=1.2.3.4"; echo "hostkey=$HK"; } > "$SOCK/$TSID.meta"
+qroute list >/dev/null 2>&1
+[ -f "$SOCK/$TSID.meta" ] && bad "expired quick session not pruned (TTL)" || ok "expired quick session pruned on scan (TTL)"
+# a CA session (no quick=1) with an old epoch is NOT pruned by the quick-TTL path
+CSID="e1e2e3e4e5e6e7e8"
+{ echo "sid=$CSID"; echo "code=$QCH2"; echo "loginuser=kelstar"; echo "label=cbox"
+  echo "registered=old"; echo "peer=1.2.3.4"; echo "hostkey=$HK"; } > "$SOCK/$CSID.meta"
+qroute list >/dev/null 2>&1
+[ -f "$SOCK/$CSID.meta" ] && ok "CA sessions are not touched by the quick-TTL prune" || bad "quick TTL wrongly pruned a CA session"
+rm -f "$SOCK/$CSID.meta"
+
 kill "$QL" 2>/dev/null; rm -f "$SOCK/$QSID.sock" "$SOCK/$QSID.binds" "$SOCK/$QSID.meta" "$ALLOWQ"
 
 echo "=== authkeys ==="
