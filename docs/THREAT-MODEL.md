@@ -42,7 +42,13 @@
    until reboot. It is **not reachable** (the tunnel and its relay socket are gone, so there is no inbound
    path), and a reboot clears it. Graceful exits (Ctrl-C / close / TERM / HUP) tear down fully.
 4. **Recording covers the support channel, not the universe.** Non-interactive `exec` (audits, upgrades —
-   where it matters) is fully tee-recorded and marked for the live command log. **Interactive** shells run
+   where it matters) is fully tee-recorded and marked for the live command log. The one thing not byte-
+   recorded is a **genuine binary file transfer** (`scp`/`rsync --server`/`sftp-server`): its bidirectional
+   binary protocol can't be tee'd without deadlocking, so it is recorded as the command line only (the
+   *fact* of the transfer). That fast path is taken **only** for a pure transfer invocation — a command
+   that also chains or substitutes (`;` `&` `|` `` ` `` `$` `<` `>` newline) is NOT treated as a transfer
+   and is fully teed, so an operator cannot run arbitrary unrecorded commands behind a transfer-looking
+   prefix. **Interactive** shells run
    as a *native* login shell with the SSH markers stripped so they can never auto-attach the
    operator's/client's shared tmux (a shell rc doing `[[ -n $SSH_CONNECTION ]] && exec tmux` would
    otherwise hijack — and a teardown could kill — that session). Where util-linux `script` is present,

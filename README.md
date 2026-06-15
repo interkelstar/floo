@@ -174,8 +174,9 @@ operator-CA-signed cert; in quick mode it accepts the single operator key proven
 the session — so you reach the *genuine* client by construction (a squatter registered a different code, so
 your code never resolves to them), with no name to collide across a fleet. It pins the relay + client host
 keys, mints a ≤60-min cert (bound to that session id), and connects end-to-end *through* the relay.
-The client's window renders a live command log from the local recording, while teardown saves a cleaned
-recording + before/after state-diff. Ctrl-C/close = full teardown.
+The client's window renders a live command log from the local recording; on teardown the complete raw
+recording (`<stamp>.log`) is saved as the tamper-evident record, with a readable rendered `.txt` beside it
++ the before/after state-diff. Ctrl-C/close = full teardown.
 
 Design & threat model: [`docs/DESIGN.md`](docs/DESIGN.md), [`docs/THREAT-MODEL.md`](docs/THREAT-MODEL.md).
 Tests: `bash test/run-all.sh` (unit + a full single-host loopback proving cert-only entry, the

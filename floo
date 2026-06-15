@@ -180,9 +180,17 @@ if [ -n "${SSH_ORIGINAL_COMMAND:-}" ]; then
     rsync\ --server*|scp\ -*|*sftp-server*)
       # binary, bidirectional file transfer: buffering stdin + tee would DEADLOCK and corrupt the
       # protocol (the "null byte" warning is the tell). Record the FACT (disclosure), pass it a
-      # clean channel — the unreadable byte stream isn't worth recording anyway.
-      { echo "----- file transfer (binary — recorded as the command only) -----"; echo "$SSH_ORIGINAL_COMMAND"; } >> "$log"
-      bash -c "$SSH_ORIGINAL_COMMAND"; exit $?
+      # clean channel — the unreadable byte stream isn't worth recording anyway. BUT only for a PURE
+      # transfer: if the command also chains/substitutes (;, &, |, backtick, $, <, >, newline) an
+      # operator could run arbitrary commands UNRECORDED behind a transfer-looking prefix, so those
+      # fall through to the normal teed-and-recorded path below.
+      case "$SSH_ORIGINAL_COMMAND" in
+        *';'*|*'&'*|*'|'*|*'`'*|*'$'*|*'<'*|*'>'*|*'
+'*) : ;;
+        *)
+          { echo "----- file transfer (binary — recorded as the command only) -----"; echo "$SSH_ORIGINAL_COMMAND"; } >> "$log"
+          bash -c "$SSH_ORIGINAL_COMMAND"; exit $? ;;
+      esac
       ;;
   esac
   in="$(cat)"
