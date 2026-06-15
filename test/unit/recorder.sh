@@ -29,6 +29,16 @@ grep -q 'R_42' <<<"$out" && ok "rsync-prefixed chain is recorded too" || bad "BY
 out="$(printf '' | run_rec 'scp -t /tmp/nonexistent_floo_xyz')"
 grep -q 'file transfer' <<<"$out" && ok "a pure transfer keeps the command-only fast path" || bad "pure transfer misclassified: [$out]"
 
+echo "=== recorder: the quick-mode 'floo-probe' liveness token records NOTHING and never reads stdin ==="
+# even with data on stdin, the probe must exit immediately (before the cat that would otherwise block)
+out="$(printf 'STDIN_THAT_WOULD_BLOCK' | timeout 5 bash -c '
+  d=$(mktemp -d); mkdir -p "$d/recording" "$d/active"; printf testnonce > "$d/marknonce"
+  cp "'"$REC"'" "$d/record-session"
+  SSH_ORIGINAL_COMMAND=floo-probe bash "$d/record-session" >/dev/null 2>&1; rc=$?
+  cat "$d"/recording/*.raw 2>/dev/null; echo "RC=$rc"; rm -rf "$d"')"
+{ grep -q 'RC=0' <<<"$out" && ! grep -q 'STDIN_THAT_WOULD_BLOCK\|floo session' <<<"$out"; } \
+  && ok "floo-probe exits 0, records nothing, doesn't block on stdin" || bad "floo-probe misbehaved: [$out]"
+
 rm -f "$REC"
 echo; echo "=== $P passed, $F failed ==="
 [ "$F" -eq 0 ]

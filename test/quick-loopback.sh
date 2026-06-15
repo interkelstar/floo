@@ -111,11 +111,14 @@ else
 fi
 
 # ── the CORRECT code: operator auto-detects quick, binds an ephemeral key, gets in (past the griefer) ──
-env -i HOME="$OPHOME" PATH="$PATH" FLOO_HOME="$OPHOME/.config/floo" \
+# Run with an OPEN stdin (`< <(sleep 30)`) and a tight timeout: the quick-mode liveness probe must NOT
+# forward/block on operator stdin (regression guard for the `floo-probe`/-n fix — a forwarded open
+# terminal would hang the client's recorder `cat` and this whole connect forever).
+timeout 25 env -i HOME="$OPHOME" PATH="$PATH" FLOO_HOME="$OPHOME/.config/floo" \
     FLOO_RELAY_HOST=127.0.0.1 FLOO_RELAY_PORT="$PORT" FLOO_RELAY_USER="$ME" \
-    "$REPO/bin/floo-powder" connect --confirm "$CODE" --no-shell >"$WORK/connect.log" 2>&1 \
-  && ok "operator connect (quick, code-bound ephemeral key) succeeded" \
-  || { bad "operator quick connect failed"; cat "$WORK/connect.log"; }
+    "$REPO/bin/floo-powder" connect --confirm "$CODE" --no-shell < <(sleep 30) >"$WORK/connect.log" 2>&1 \
+  && ok "operator connect (quick, code-bound ephemeral key; open stdin doesn't hang) succeeded" \
+  || { bad "operator quick connect failed/hung"; cat "$WORK/connect.log"; }
 
 OUT="$(env -i HOME="$OPHOME" PATH="$PATH" FLOO_HOME="$OPHOME/.config/floo" \
     FLOO_RELAY_HOST=127.0.0.1 FLOO_RELAY_PORT="$PORT" FLOO_RELAY_USER="$ME" \

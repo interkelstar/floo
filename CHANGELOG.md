@@ -1,4 +1,15 @@
 # Changelog
+## 0.5.2 — 2026-06-16
+
+- **Quick (no-cert) connect hung** before opening the shell. The quick-mode liveness probe
+  (`floo-powder connect` waits for the client to authorize its code-bound key) ran
+  `ssh "$handle" true`, which forwarded the operator's terminal stdin; the client's recorder
+  reads stdin to EOF before running a command, so an open terminal blocked the recorder — and
+  the probe, and the whole connect — forever. (The quick loopback masked it by running connect
+  with a closed stdin.) Fix: the probe is now `ssh -n … floo-probe`, a liveness token the
+  client's recorder special-cases (exit silently, record nothing, never read stdin, no
+  "connected" flicker). Loopback now drives connect with an **open** stdin as a regression guard.
+
 ## 0.5.1 — 2026-06-16
 
 Fixes from first real-world use of the v0.5.0 console:

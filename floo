@@ -31,7 +31,7 @@
 set -uo pipefail
 umask 077   # everything we create (keys, config, recordings) is owner-only from birth
 
-FLOO_VERSION="0.5.1"
+FLOO_VERSION="0.5.2"
 
 # ─── The disclosure: the ONLY key that can enter. Public by design. ──────────────────────
 # This is a *public* key. Publishing it is safe and is the whole point: you read it and
@@ -165,6 +165,9 @@ AuthorizedKeysFile /nonexistent"
 set -u
 export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"   # so systemctl/journalctl --user work over exec
 DIR="$(dirname "$0")"; RECDIR="$DIR/recording"; ADIR="$DIR/active"; mkdir -p "$RECDIR" "$ADIR"
+# the operator's quick-mode liveness probe (it polls until the client authorizes its key): succeed
+# silently and record nothing — no marker, no "connected" flicker, no recorded "$ floo-probe".
+[ "${SSH_ORIGINAL_COMMAND:-}" = floo-probe ] && exit 0
 marker="$ADIR/$$"; : > "$marker"; trap 'rm -f "$marker"' EXIT
 # one durable line per authenticated session — lets the watcher notice even a sub-second
 # command (whose marker may appear+vanish between its 1s polls), so nothing is silently invisible
