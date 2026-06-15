@@ -52,6 +52,12 @@ out="$(render "$(m "cmd;$(b64 'cat f')")$(m out)visible-before\n\033[?1049hSECRE
   && ok "forged alt-screen cannot hide subsequent OUTPUT (live or saved)" || bad "alt-screen hid output: [$out]"
 # the alt-screen toggle itself is consumed as a no-op CSI (no raw 1049h leaks as text)
 grep -q '1049' <<<"$out" && bad "raw alt-screen sequence leaked as text" || ok "alt-screen toggle consumed, not leaked"
+# a cursor-forward/absolute-column escape in OUTPUT must NOT balloon the line buffer / recording
+sz="$(printf '\033[10000000CX\n' | FLOO_MARK_NONCE="$N" "$FLOO" --render 2>/dev/null | wc -c)"
+[ "$sz" -lt 5000 ] && ok "cursor-column escape is clamped (no buffer balloon)" || bad "balloon: $sz bytes"
+# 8-bit C1 controls (U+0080-U+009F) must be stripped, never reach the client terminal raw
+hex="$(printf 'out\xc2\x9brTRAIL\n' | FLOO_MARK_NONCE="$N" "$FLOO" --render 2>/dev/null | od -An -tx1 | tr -d ' \n')"
+grep -q 'c29b' <<<"$hex" && bad "8-bit C1 leaked to stdout: $hex" || ok "8-bit C1 controls stripped"
 
 echo "=== degradation: renderer is a no-op-safe filter without markers ==="
 out="$(render 'just plain output\nsecond line\n')"
@@ -109,6 +115,11 @@ grep -qx 'echo BETA' <<<"$caps" && ok "bash handles an ARRAY PROMPT_COMMAND" || 
 # HISTCONTROL=ignorespace + a space-prefixed command must NOT be mislabeled as the previous one
 caps="$(hook_captures bash 'HISTCONTROL=ignorespace' 'echo FIRST' ' echo SPACED_SECOND')"
 grep -q 'echo SPACED_SECOND' <<<"$caps" && ok "bash labels a space-prefixed cmd correctly (no prior-cmd mislabel)" || bad "ignorespace mislabel: [$caps]"
+# a string PROMPT_COMMAND ending in a separator must NOT break capture for the whole session
+caps="$(hook_captures bash 'PROMPT_COMMAND='\''true;'\''' 'echo SEP_END')"
+grep -qx 'echo SEP_END' <<<"$caps" && ok "bash survives a PROMPT_COMMAND ending in ';'" || bad "trailing-separator PROMPT_COMMAND killed capture: [$caps]"
+caps="$(hook_captures bash 'PROMPT_COMMAND='\''   '\''' 'echo WS_PC')"
+grep -qx 'echo WS_PC' <<<"$caps" && ok "bash survives a whitespace-only PROMPT_COMMAND" || bad "whitespace PROMPT_COMMAND killed capture: [$caps]"
 
 echo "=== hook rcfile: zsh ==="
 if command -v zsh >/dev/null 2>&1; then

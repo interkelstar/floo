@@ -459,7 +459,8 @@ render_console() {
   }
   local last_status="" nonce; nonce="$(cat "$dir/marknonce" 2>/dev/null)"
   trap '_con_setup; [ -n "${last_status:-}" ] && _con_status "$last_status"' WINCH
-  trap 'kill "$rpid" 2>/dev/null; _con_teardown; exit 0' INT TERM HUP
+  # reap the whole pipeline (the tail child outlives a bare `kill $rpid`), then restore the terminal
+  trap 'kill "$rpid" 2>/dev/null; pkill -f "tail.*$dir/recording" 2>/dev/null; _con_teardown; exit 0' INT TERM HUP
   printf '\033[?25l'; _con_setup
   ( tail -n +1 -F "$dir"/recording/*.log 2>/dev/null | FLOO_MARK_NONCE="$nonce" render_stream ) &
   rpid=$!
@@ -480,6 +481,7 @@ render_console() {
     fi
     sleep 1
   done
+  pkill -f "tail.*$dir/recording" 2>/dev/null   # reap the tail if the pipeline ended on its own
   _con_teardown
 }
 
@@ -519,6 +521,9 @@ import sys, os, re, base64, codecs
 NONCE = os.environ.get('FLOO_MARK_NONCE', '')
 MARK_RE = re.compile(r'1337;floo;' + re.escape(NONCE) + r';(\w+)(?:;(.*))?$', re.S) if NONCE else None
 MAXSEQ = 1 << 16   # abandon an unterminated escape/OSC longer than this (anti-DoS, avoids O(n^2))
+MAXCOL = 2000      # a real terminal clamps the cursor to its width; we clamp too, so a single
+                   # operator-controlled cursor-forward/absolute-column escape (or a newline-less
+                   # line) can never balloon the line buffer / the saved recording. Long lines wrap.
 out = sys.stdout
 cur = []
 col = 0
@@ -527,6 +532,7 @@ def emit(line):
     out.write(line.rstrip() + "\n"); out.flush()
 def put(ch):
     global col
+    if col >= MAXCOL: flush_line()           # wrap a pathologically long line instead of growing cur
     while len(cur) <= col: cur.append(' ')
     cur[col] = ch; col += 1
 def flush_line():
@@ -535,7 +541,7 @@ def flush_line():
 def sanitize_label(s):
     # The command label is display-only: never let it carry raw escapes to the client terminal
     # (those could overwrite the pinned status line / forge the connection indicator). Strip CSI/
-    # OSC sequences and C0 controls; keep newlines so a multi-line exec script renders as lines.
+    # OSC sequences, C0 AND 8-bit C1 controls; keep newlines so a multi-line exec script renders as lines.
     o = []; i = 0; n = len(s)
     while i < n:
         c = s[i]
@@ -550,10 +556,13 @@ def sanitize_label(s):
                 while j < n and s[j] not in '\x07\x1b': j += 1
                 i = j+1; continue
             i += 2; continue
-        if c == '\n': o.append('\n'); i += 1; continue
+        if c == '\n':
+            if len(o) < MAXSEQ: o.append('\n')                 # bound a pathological label too
+            i += 1; continue
         if c == '\t': o.append(' '); i += 1; continue
-        if ord(c) < 32: i += 1; continue
-        o.append(c); i += 1
+        if ord(c) < 32 or 0x80 <= ord(c) <= 0x9f: i += 1; continue   # drop C0 + 8-bit C1
+        if len(o) < MAXSEQ: o.append(c)
+        i += 1
     return ''.join(o)
 def handle_marker(kind, arg):
     if kind == "cmd":
@@ -593,9 +602,9 @@ def feed(text):
                     elif m == 1:
                         for k in range(min(col+1, len(cur))): cur[k] = ' '
                     else: cur[:] = []
-                elif f == 'C': col += (nums[0] or 1)
+                elif f == 'C': col = min(MAXCOL, col + (nums[0] or 1))     # clamp: no balloon
                 elif f == 'D': col = max(0, col-(nums[0] or 1))
-                elif f == 'G': col = max(0, (nums[0] or 1)-1)
+                elif f == 'G': col = min(MAXCOL, max(0, (nums[0] or 1)-1))  # clamp: no balloon
                 elif f in ('H', 'f'): col = 0
                 # NB: full-screen apps (alt-screen ?1049h/l, absolute row moves) are NOT collapsed or
                 # suppressed — suppression keyed on operator-controlled output bytes could hide real
@@ -625,7 +634,7 @@ def feed(text):
         if ch == '\n': flush_line(); i += 1; continue
         if ch == '\b': col = max(0, col-1); i += 1; continue
         if ch == '\t': put(' '); i += 1; continue
-        if ord(ch) < 32: i += 1; continue
+        if ord(ch) < 32 or 0x80 <= ord(ch) <= 0x9f: i += 1; continue   # drop C0 AND 8-bit C1 controls
         put(ch); i += 1
     return ""
 pending = ""
@@ -668,7 +677,7 @@ __floo_on=; __floo_active=; __floo_hist=
 __floo_preexec() {                               # DEBUG: fires before every simple command
   [ -n "\${COMP_LINE:-}" ] && return             # readline completion, not a command
   [ -z "\$__floo_on" ] && return                 # inside PROMPT_COMMAND / a later pipeline stage / startup
-  case "\$BASH_COMMAND" in __floo_preexec|__floo_precmd|__floo_arm) return;; esac
+  case "\$BASH_COMMAND" in __floo_preexec|__floo_precmd|__floo_arm|__floo_runpc) return;; esac
   __floo_on=; __floo_active=1                     # consume the arm for the rest of THIS command line
   local h n cmd
   h=\$(HISTTIMEFORMAT= builtin history 1 2>/dev/null)
@@ -685,10 +694,16 @@ __floo_precmd() {                                # FIRST in PROMPT_COMMAND: clos
   return \$ec
 }
 __floo_arm() { local e=\$?; __floo_on=1; return \$e; }   # LAST in PROMPT_COMMAND: arm for the user's next line
+# Install precmd-first / arm-last around the user's PROMPT_COMMAND. For an ARRAY PROMPT_COMMAND each
+# element runs independently. For a STRING we run it via eval inside a wrapper, so a user string that
+# ends in a separator (;, &&, ||, |, &), starts with ;, or is whitespace-only can NEVER turn the
+# install into an empty-statement syntax error (which would silently kill all capture for the session).
 if [[ "\$(declare -p PROMPT_COMMAND 2>/dev/null)" == "declare -a"* ]]; then
-  PROMPT_COMMAND=(__floo_precmd "\${PROMPT_COMMAND[@]}" __floo_arm)   # preserve an ARRAY PROMPT_COMMAND
+  PROMPT_COMMAND=(__floo_precmd "\${PROMPT_COMMAND[@]}" __floo_arm)
 else
-  PROMPT_COMMAND="__floo_precmd\${PROMPT_COMMAND:+; \$PROMPT_COMMAND}; __floo_arm"
+  __floo_user_pc=\$PROMPT_COMMAND
+  __floo_runpc() { [ -n "\$__floo_user_pc" ] && eval "\$__floo_user_pc"; return 0; }
+  PROMPT_COMMAND='__floo_precmd; __floo_runpc; __floo_arm'
 fi
 trap '__floo_preexec' DEBUG
 RC
@@ -716,9 +731,10 @@ RC
 
 # ─── Make a recording readable. ──────────────────────────────────────────────────────────
 # Runs each saved .log through the SAME renderer the live console uses: nonce-valid floo markers
-# become "$ command" lines, terminal control sequences collapse to the final visible text, and a
-# full-screen app shows as a one-liner. One renderer for the live pane AND the saved log means they
-# can never drift, and the saved recording is the readable command-log rather than raw escapes.
+# become "$ command" lines and terminal control sequences collapse to the final visible text (a
+# full-screen app renders inline as its collapsed screen content — never hidden/suppressed). One
+# renderer for the live pane AND the saved log means they can never drift, and the saved recording
+# is the readable command-log rather than raw escapes.
 clean_recordings() {
   local d="$1"; [ -d "$d" ] || return 0
   command -v python3 >/dev/null 2>&1 || return 0

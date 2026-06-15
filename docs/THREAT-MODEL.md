@@ -50,8 +50,10 @@
    available, the disclosure for an interactive session degrades to the `sessions.log` entry + the
    before/after state-diff. Bash/zsh hooks add exact command boundaries (the bash hook reads the full
    typed line and handles any PROMPT_COMMAND shape; with history disabled / HISTCONTROL=ignorespace it
-   falls back to the first simple command rather than mislabel); other shells still produce a
-   cleaned output stream. Teardown kills the sshd by its own PID file, never a process-name pattern.
+   falls back to the first simple command rather than mislabel; a bare function-definition line gets no
+   `$`-label since bash fires no hook for it, but is still visible in the recorded keystrokes and cannot
+   hide or mislabel a later command); other shells still produce a cleaned output stream. Teardown kills
+   the sshd by its own PID file, never a process-name pattern.
 5. **The live command log is integrity-checked against output forgery, but is not a sandbox.** Each
    session mints a *secret per-session marker nonce*; the injected bash/zsh hooks and the `exec` recorder
    stamp every command marker with it, and the renderer honours a marker **only** if the nonce matches.
