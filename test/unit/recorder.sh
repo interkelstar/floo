@@ -15,7 +15,7 @@ run_rec(){ # $1=SSH_ORIGINAL_COMMAND ; stdin = the piped input ; echoes the reco
   local soc="$1" d; d="$(mktemp -d)"; mkdir -p "$d/recording" "$d/active"; printf 'testnonce' > "$d/marknonce"
   cp "$REC" "$d/record-session"
   SSH_ORIGINAL_COMMAND="$soc" bash "$d/record-session" >/dev/null 2>&1
-  cat "$d"/recording/*.log 2>/dev/null; rm -rf "$d"
+  cat "$d"/recording/*.raw 2>/dev/null; rm -rf "$d"
 }
 
 echo "=== recorder: binary-transfer bypass is closed ==="

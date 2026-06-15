@@ -135,16 +135,16 @@ OUT="$(env -i HOME="$OPHOME" PATH="$PATH" FLOO_HOME="$OPHOME/.config/floo" \
 grep -q 'MARKER_42' <<<"$OUT" && ok "operator ran a command on the box via the relay pivot (cert auth)" \
   || { bad "exec over the pivot did not return expected output"; echo "--- out:"; echo "$OUT"; echo "--- err:"; cat "$WORK/exec.err"; echo "--- client sshd.log:"; tail -15 "$RUN"/floo/testbot/sshd.log 2>/dev/null; }
 
-# ── 5. the session was recorded on the CLIENT side ───────────────────────────────────────
+# ── 5. the session was recorded on the CLIENT side (raw .raw stream) ──────────────────────
 sleep 0.3
-if ls "$RUN"/floo/testbot/recording/*.log >/dev/null 2>&1 && grep -rq 'MARKER_42' "$RUN"/floo/testbot/recording/ 2>/dev/null; then
+if ls "$RUN"/floo/testbot/recording/*.raw >/dev/null 2>&1 && grep -aq 'MARKER_42' "$RUN"/floo/testbot/recording/session.raw 2>/dev/null; then
   ok "the session (incl. the bot's command) was recorded to the client's disk"
 else
   bad "no client-side recording of the session"
 fi
 
 # ── 5b. the recording is command-level: the exec path emits nonce-stamped floo markers ───
-if grep -aq '1337;floo;' "$RUN"/floo/testbot/recording/*.log 2>/dev/null; then
+if grep -aq '1337;floo;' "$RUN"/floo/testbot/recording/session.raw 2>/dev/null; then
   ok "recording carries nonce-stamped floo command markers (exec path)"
 else
   bad "no floo command markers in the recording"
@@ -191,16 +191,16 @@ fi
 CERT="$HOME/.config/floo/sessions/testbot/opkey-cert.pub"
 [ -f "$CERT" ] && ssh-keygen -Lf "$CERT" | grep -q 'Valid:.*to' && ok "operator cert is time-boxed (≤60m)" || note "cert file already cleaned"
 
-# ── 8. saved recording: raw .log is the COMPLETE record; .txt is the readable rendered log ───
+# ── 8. saved recording: raw .raw is the COMPLETE record; .log is the readable rendered log ───
 KEEP="$THOME/.floo-last-session/recording"   # the client ran with HOME=$THOME
-if ls "$KEEP"/*.log >/dev/null 2>&1; then
-  grep -aq '1337;floo' "$KEEP"/*.log 2>/dev/null && ok "raw .log keeps the actual bytes (markers present — complete record)" || note "no markers in raw .log (timing)"
-  grep -aq 'MARKER_42' "$KEEP"/*.log 2>/dev/null && ok "raw .log preserves the real output" || note "MARKER_42 absent in raw .log (timing)"
-  if ls "$KEEP"/*.txt >/dev/null 2>&1; then
-    grep -aq '1337;floo' "$KEEP"/*.txt 2>/dev/null && bad "readable .txt leaked raw floo markers" || ok "readable .txt strips raw floo OSC markers"
-    grep -aqE '^\$ ' "$KEEP"/*.txt 2>/dev/null && ok "readable .txt rendered a \$ command line (marker -> command-log)" || note "no \$ command line in .txt"
+if ls "$KEEP"/*.raw >/dev/null 2>&1; then
+  grep -aq '1337;floo' "$KEEP"/*.raw 2>/dev/null && ok "raw .raw keeps the actual bytes (markers present — complete record)" || note "no markers in raw .raw (timing)"
+  grep -aq 'MARKER_42' "$KEEP"/*.raw 2>/dev/null && ok "raw .raw preserves the real output" || note "MARKER_42 absent in raw .raw (timing)"
+  if ls "$KEEP"/*.log >/dev/null 2>&1; then
+    grep -aq '1337;floo' "$KEEP"/*.log 2>/dev/null && bad "readable .log leaked raw floo markers" || ok "readable .log strips raw floo OSC markers"
+    grep -aqE '^\$ ' "$KEEP"/*.log 2>/dev/null && ok "readable .log rendered a \$ command line (marker -> command-log)" || note "no \$ command line in .log"
   else
-    note "no readable .txt produced (no python3?) — raw .log still complete"
+    note "no readable .log produced (no python3?) — raw .raw still complete"
   fi
 else
   note "no ~/.floo-last-session recording saved — skipping cleaned-save check"

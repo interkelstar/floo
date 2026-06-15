@@ -125,7 +125,7 @@ grep -q 'QMARK_42' <<<"$OUT" && ok "BOT-operator (exec) ran a command over the n
 
 # ── the BOT session must be RECORDED to the client's disk (logging, no-cert mode) ──
 sleep 0.3
-{ ls "$RUN"/floo/qbox/recording/*.log >/dev/null 2>&1 && grep -rq 'QMARK_42' "$RUN"/floo/qbox/recording/ 2>/dev/null; } \
+{ ls "$RUN"/floo/qbox/recording/*.raw >/dev/null 2>&1 && grep -aq 'QMARK_42' "$RUN"/floo/qbox/recording/session.raw 2>/dev/null; } \
   && ok "BOT-operator session recorded on the client (cmd + output logged)" \
   || { bad "BOT-operator session NOT recorded"; ls -la "$RUN"/floo/qbox/recording/ 2>/dev/null; }
 

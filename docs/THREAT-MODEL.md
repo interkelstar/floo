@@ -67,15 +67,15 @@
    controls — therefore cannot forge a `$ command` line, and cannot smuggle raw escape sequences onto the
    client's screen (the command label and all output are stripped of control sequences, C0 and 8-bit C1,
    and the cursor column is clamped so no escape can balloon the buffer). The rendered views — the live
-   pane and the saved readable `<stamp>.txt` — render the session the way a **terminal** would: a terminal
+   pane and the saved readable `<stamp>.log` — render the session the way a **terminal** would: a terminal
    does not display control-sequence bodies (e.g. an OSC string), and neither do we, so a *determined*
    operator can obscure the **rendered** view (wrap output in a control sequence, unset the hooks, run an
    unhooked shell, or read the session's own files to recover the nonce). That is expected: the rendered
    view is a transparency aid for a cooperating-but-watched operator, **not** a containment boundary. The
    guarantee that survives a hostile operator is the **raw recording**: `~/.floo-last-session/recording/
-   <stamp>.log` is the exact tee'd byte stream with **nothing dropped** — every command and every byte of
+   session.raw` is the exact tee'd byte stream with **nothing dropped** — every command and every byte of
    output, including anything hidden from the rendered view — so it is the after-the-fact tamper-evident
-   record. (The `.txt` beside it is the readable render.) The Ctrl-C revoke + before/after state-diff are
+   record. (The `session.log` beside it is the readable render.) The Ctrl-C revoke + before/after state-diff are
    unchanged.
 6. **State-diff scope** is the three access surfaces (authorized_keys across readable homes, enabled
    systemd user+system units, user + system cron). It is a disclosure of *those* surfaces, not a full

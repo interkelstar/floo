@@ -1,4 +1,24 @@
 # Changelog
+## 0.5.1 — 2026-06-16
+
+Fixes from first real-world use of the v0.5.0 console:
+
+- **Live console showed no commands.** The pane tailed `recording/*.log` — a glob expanded when the
+  session opens, before any recording file exists, so `tail -F` followed a literal that never appeared
+  (status still flipped to "connected", but nothing scrolled). The recorder now writes a **fixed-name**
+  `session.raw` that `tail -F` follows reliably; added a unit test that drives the live tail of a
+  later-created stream (the gap that let this ship).
+- **Each command appeared ~3×** in the readable log (raw shell prompt + typed-command echo *and* the
+  `$ cmd` marker). The hook now emits a `prompt` marker and the renderer drops the inter-command
+  prompt/echo region, so each command shows once as `$ <cmd>`. Marker-less (non-hooked) sessions still
+  render in full; the raw `session.raw` still keeps every byte.
+- **"technician finished" flapped** during a multi-step bot operation (each `exec` is a brief separate
+  connection), nudging the client to close mid-update. The idle state no longer says "finished" — it
+  reads "support session open · technician stepped away (still recording) — Ctrl-C only when you are
+  done", and only after a longer idle so quick gaps don't trigger it.
+- **Recording artifact naming flipped** to match intuition: **`session.log` is the readable command-log**
+  (what you open), **`session.raw` is the complete raw record** (was `.log`/`.txt`).
+
 ## 0.5.0 — 2026-06-13
 
 ### Added

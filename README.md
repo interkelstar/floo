@@ -29,14 +29,14 @@ Only when you want help. Whoever's helping you hands you a one-line command — 
 the pairing code it prints:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/interkelstar/floo/v0.5.0/floo \
+curl -fsSL https://raw.githubusercontent.com/interkelstar/floo/v0.5.1/floo \
   | bash -s -- --relay relay.example.com --pin 0123456789abcdef
 ```
 
 The `--pin` is a short fingerprint of the operator's relay. `floo` verifies the relay against it, then
 fetches the operator's key *from* the relay — so there are no long keys to paste (and nothing for a
 terminal to fold and corrupt). The URL is a version tag, so you run exactly the code you can read at
-`github.com/interkelstar/floo/tree/v0.5.0`.
+`github.com/interkelstar/floo/tree/v0.5.1`.
 
 …or, if you'll get support more than once, **install it and save your operator once**:
 
@@ -58,9 +58,9 @@ its text output, rendered through a small terminal emulator that strips control 
 the operator runs can take over the status row). Full-screen tools (`vim`, `less`, `top`) render inline
 as their collapsed screen content — they are deliberately **not** hidden or summarized away, because any
 "collapse on a full-screen marker" keyed off operator output could be used to hide real output from you.
-On exit, the session is saved under `~/.floo-last-session/recording/`: the **`.log` is the complete raw
-recording** (the exact bytes — the tamper-evident record, holding everything even if a determined
-operator obscured the live view), and a readable rendered `.txt` is written beside it.
+On exit, the session is saved under `~/.floo-last-session/recording/`: **`session.log` is the readable
+command-log** (what you open), and **`session.raw` is the complete raw recording** (the exact bytes — the
+tamper-evident record, holding everything even if a determined operator obscured the rendered view).
 
 ### Don't trust us — read us
 
@@ -84,7 +84,7 @@ nothing else to clone and you can audit exactly what gets root. Fetch it, read i
 your relay:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/interkelstar/floo/v0.5.0/bin/floo-powder -o floo-powder
+curl -fsSL https://raw.githubusercontent.com/interkelstar/floo/v0.5.1/bin/floo-powder -o floo-powder
 less floo-powder                     # read it — incl. the embedded relay that `init` sudo-runs, inline + readable
 sh floo-powder install               # install into ~/.local/bin (self-fetches if piped)
 floo-powder init                     # turnkey: keys + stands up the embedded relay + prints the client one-liner
@@ -151,7 +151,7 @@ Helping a friend (or getting help) and neither of you wants to run a relay? Use 
 
 ```bash
 # the person who needs help (the client) runs this and reads back the code it prints:
-curl -fsSL https://raw.githubusercontent.com/interkelstar/floo/v0.5.0/floo \
+curl -fsSL https://raw.githubusercontent.com/interkelstar/floo/v0.5.1/floo \
   | bash -s -- --public --relay floo.kelstar.me --pin df2b83ff925f89bd
 
 # the person helping (the operator) installs floo-powder once, then connects with that code:
@@ -175,7 +175,7 @@ the session — so you reach the *genuine* client by construction (a squatter re
 your code never resolves to them), with no name to collide across a fleet. It pins the relay + client host
 keys, mints a ≤60-min cert (bound to that session id), and connects end-to-end *through* the relay.
 The client's window renders a live command log from the local recording; on teardown the complete raw
-recording (`<stamp>.log`) is saved as the tamper-evident record, with a readable rendered `.txt` beside it
+recording (`session.raw`) is saved as the tamper-evident record, with a readable rendered `session.log` beside it
 + the before/after state-diff. Ctrl-C/close = full teardown.
 
 Design & threat model: [`docs/DESIGN.md`](docs/DESIGN.md), [`docs/THREAT-MODEL.md`](docs/THREAT-MODEL.md).

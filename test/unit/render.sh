@@ -143,21 +143,31 @@ grep -q '1;.*r' <<<"$frame" && ok "sets a DECSTBM scroll region" || bad "no scro
 grep -q 'waiting for the technician' <<<"$frame" && ok "paints the waiting status" || bad "no status line: [$frame]"
 grep -qE '\^\[\[r' <<<"$frame" && ok "restores the full scroll region on teardown" || bad "no region reset: [$frame]"
 
-echo "=== saved recording: raw .log preserved, readable .txt rendered alongside ==="
+echo "=== saved recording: raw .raw preserved, readable .log rendered alongside ==="
 CD="$(mktemp -d)"
-# raw .log includes a non-floo OSC wrapping output (the hide vector) — it MUST survive in the raw copy
-printf '%b' "before\n$(m "cmd;$(b64 'echo hidden')")$(m out)visible\n\033]666;WRAPPED_SECRET\007after\n$(m 'end;0')" > "$CD/session.log"
-raw_before="$(cat "$CD/session.log")"
+# the raw .raw includes a non-floo OSC wrapping output (the hide vector) — it MUST survive in the raw copy
+printf '%b' "before\n$(m "cmd;$(b64 'echo hidden')")$(m out)visible\n\033]666;WRAPPED_SECRET\007after\n$(m 'end;0')" > "$CD/session.raw"
+raw_before="$(cat "$CD/session.raw")"
 FLOO_TESTING=1 FLOO_MARK_NONCE="$N" "$FLOO" --clean-dir "$CD" 2>/dev/null
-# the raw .log is left UNTOUCHED (complete, tamper-evident — incl. the OSC-wrapped secret)
-[ "$(cat "$CD/session.log")" = "$raw_before" ] && ok "raw .log is left intact (complete record)" || bad "raw .log was modified"
-grep -q 'WRAPPED_SECRET' "$CD/session.log" && ok "raw .log preserves OSC-wrapped output (no evidence destruction)" || bad "raw lost the wrapped output"
-# the readable .txt is the rendered command-log
-txt="$(cat "$CD/session.txt" 2>/dev/null)"
-grep -q '1337;floo' <<<"$txt" && bad "readable .txt leaked raw floo OSC markers" || ok "readable .txt strips raw floo OSC markers"
-grep -qx '$ echo hidden' <<<"$txt" && ok "readable .txt renders the command line" || bad "readable lost the command: [$txt]"
-grep -q 'visible' <<<"$txt" && ok "readable .txt keeps shown output" || bad "readable lost shown output: [$txt]"
+# the raw .raw is left UNTOUCHED (complete, tamper-evident — incl. the OSC-wrapped secret)
+[ "$(cat "$CD/session.raw")" = "$raw_before" ] && ok "raw .raw is left intact (complete record)" || bad "raw .raw was modified"
+grep -q 'WRAPPED_SECRET' "$CD/session.raw" && ok "raw .raw preserves OSC-wrapped output (no evidence destruction)" || bad "raw lost the wrapped output"
+# the readable .log is the rendered command-log
+rl="$(cat "$CD/session.log" 2>/dev/null)"
+grep -q '1337;floo' <<<"$rl" && bad "readable .log leaked raw floo OSC markers" || ok "readable .log strips raw floo OSC markers"
+grep -qx '$ echo hidden' <<<"$rl" && ok "readable .log renders the command line" || bad "readable lost the command: [$rl]"
+grep -q 'visible' <<<"$rl" && ok "readable .log keeps shown output" || bad "readable lost shown output: [$rl]"
 rm -rf "$CD"
+
+echo "=== LIVE console: tail -F of a session.raw created AFTER the tail starts (the A-bug) ==="
+LD="$(mktemp -d)"; mkdir -p "$LD/recording"
+( tail -n +1 -F "$LD/recording/session.raw" 2>/dev/null | FLOO_MARK_NONCE="$N" "$FLOO" --render ) > "$LD/live.out" 2>/dev/null &
+LPID=$!; sleep 0.8
+{ printf '=== session ===\n'; m prompt; printf 'h ~ \xc2\xbb id\r\n'; m "cmd;$(b64 'id -un')"; m out; printf 'kelstar\n'; m 'end;0'; m prompt; } >> "$LD/recording/session.raw"
+sleep 1.5; kill "$LPID" 2>/dev/null; wait "$LPID" 2>/dev/null
+{ grep -qx '$ id -un' "$LD/live.out" && grep -qx 'kelstar' "$LD/live.out"; } && ok "live pane shows the command from a late-created session.raw" || bad "live pane blank: [$(cat "$LD/live.out")]"
+grep -q 'h ~ ' "$LD/live.out" && bad "live pane leaked the raw prompt/echo (dedup failed)" || ok "live pane suppressed the prompt/echo (no 3x)"
+rm -rf "$LD"
 
 echo "=== no temp-file leak from --render ==="
 before=$(ls "${TMPDIR:-/tmp}"/floo-render.* 2>/dev/null | wc -l)

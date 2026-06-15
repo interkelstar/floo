@@ -31,7 +31,7 @@
 set -uo pipefail
 umask 077   # everything we create (keys, config, recordings) is owner-only from birth
 
-FLOO_VERSION="0.5.0"
+FLOO_VERSION="0.5.1"
 
 # ─── The disclosure: the ONLY key that can enter. Public by design. ──────────────────────
 # This is a *public* key. Publishing it is safe and is the whole point: you read it and
@@ -170,7 +170,11 @@ marker="$ADIR/$$"; : > "$marker"; trap 'rm -f "$marker"' EXIT
 # command (whose marker may appear+vanish between its 1s polls), so nothing is silently invisible
 printf '%s %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "${SSH_ORIGINAL_COMMAND:-<interactive shell>}" >> "$DIR/sessions.log"
 stamp="$(date -u +%Y%m%dT%H%M%SZ)-$$"
-log="$RECDIR/$stamp.log"
+# ONE fixed-name raw stream per session dir (all operator connections append to it). Fixed name so
+# the live console's `tail -F` can follow it even though render_console starts BEFORE the operator
+# connects (a glob expanded at that moment matches nothing → tail would follow a literal that never
+# appears). The raw .raw is the complete record; teardown renders a readable .log beside it.
+log="$RECDIR/session.raw"
 { echo "=== floo session $stamp ==="; echo "from: ${SSH_CONNECTION:-?}"; echo "cmd : ${SSH_ORIGINAL_COMMAND:-<interactive shell>}"; echo; } >> "$log"
 if [ -n "${SSH_ORIGINAL_COMMAND:-}" ]; then
   # non-interactive (audit/upgrade script piped in): put BOTH the commands AND their output in the
@@ -448,7 +452,7 @@ _con_line() {
   case "$1" in
     waiting)   printf '%s◷ waiting for the technician to connect — Ctrl-C cancels%s' "$D" "$X";;
     connected) printf '%s● technician connected · %s · Ctrl-C cuts the connection%s' "$G" "$2" "$X";;
-    finished)  printf '%s○ technician finished — Ctrl-C to close, or wait if they reconnect%s' "$D" "$X";;
+    idle)      printf '%s● support session open · %s · technician stepped away (still recording) — Ctrl-C only when you are done%s' "$D" "$2" "$X";;
   esac
 }
 
@@ -462,7 +466,7 @@ render_console() {
     printf '%s\n' "$$" > "$dir/watch.pid"; mkdir -p "$dir/active"
   fi
   command -v python3 >/dev/null 2>&1 || {
-    if [ "$read_only" = 1 ]; then tail -n +1 -F "$dir"/recording/*.log 2>/dev/null; else monitor; fi
+    if [ "$read_only" = 1 ]; then tail -n +1 -F "$dir/recording/session.raw" 2>/dev/null; else monitor; fi
     return
   }
   local last_status="" nonce; nonce="$(cat "$dir/marknonce" 2>/dev/null)"
@@ -471,7 +475,8 @@ render_console() {
   # also kill another pane watching the same session), then restore the terminal
   trap 'pkill -P "$rpid" 2>/dev/null; kill "$rpid" 2>/dev/null; _con_teardown; exit 0' INT TERM HUP
   printf '\033[?25l'; _con_setup
-  ( tail -n +1 -F "$dir"/recording/*.log 2>/dev/null | FLOO_MARK_NONCE="$nonce" render_stream ) &
+  # tail a FIXED name (`tail -F` retries it until the recorder creates it on the first connect).
+  ( tail -n +1 -F "$dir/recording/session.raw" 2>/dev/null | FLOO_MARK_NONCE="$nonce" render_stream ) &
   rpid=$!
   seen="$( [ -f "$dir/sessions.log" ] && wc -l < "$dir/sessions.log" || echo 0 )"
   last_status="$(_con_line waiting)"; _con_status "$last_status"
@@ -485,8 +490,11 @@ render_console() {
       seen="$now"; idle=0; [ -z "$start" ] && start="$SECONDS"; shown=1; CONNECT_LOGGED=1
       last_status="$(_con_line connected "$(_fmt_elapsed $((SECONDS-start)))")"; _con_status "$last_status"
     elif [ "$shown" = 1 ]; then
+      # the operator stepped away (a bot operator runs many brief `exec` connections with gaps). Don't
+      # cry "finished" — that nudges the client to close mid-operation. Only after a long idle, and
+      # only ever as "session still open / still recording". 30s avoids flapping between quick execs.
       idle=$((idle + 1))
-      [ "$idle" -ge 8 ] && { last_status="$(_con_line finished)"; _con_status "$last_status"; shown=0; idle=0; }
+      [ "$idle" -ge 30 ] && { last_status="$(_con_line idle "$(_fmt_elapsed $((SECONDS-start)))")"; _con_status "$last_status"; shown=0; idle=0; }
     fi
     sleep 1
   done
@@ -536,6 +544,11 @@ MAXCOL = 2000      # a real terminal clamps the cursor to its width; we clamp to
 out = sys.stdout
 cur = []
 col = 0
+# SUP: in a hooked session, suppress the inter-command region (the shell prompt + the echo of the
+# typed command) in the RENDERED view — the command is already shown cleanly via its `$ <cmd>` marker
+# and its output between out/end. Starts off, so pre-first-marker content and marker-less (non-hooked)
+# sessions render fully; turns on after each `end`, off on each `cmd`. The raw `.raw` keeps every byte.
+SUP = {"on": False}
 decoder = codecs.getincrementaldecoder('utf-8')('replace')
 def emit(line):
     out.write(line.rstrip() + "\n"); out.flush()
@@ -575,6 +588,7 @@ def sanitize_label(s):
     return ''.join(o)
 def handle_marker(kind, arg):
     if kind == "cmd":
+        SUP["on"] = False                        # show this command + its output
         try: raw = base64.b64decode(arg or "").decode('utf-8', 'replace')
         except Exception: raw = arg or ""
         cmd = sanitize_label(raw)
@@ -584,10 +598,14 @@ def handle_marker(kind, arg):
             if extra.strip(): emit("  " + extra)
     elif kind == "out":
         pass
+    elif kind == "prompt":
+        if cur: flush_line()
+        SUP["on"] = True                         # suppress the prompt + the typed-command echo
     elif kind == "end":
         try: code = int(arg or "0")
         except ValueError: code = 0
         if code != 0: emit("  ↳ exit %d" % code)
+        SUP["on"] = True
 def feed(text):
     global col
     i = 0; n = len(text)
@@ -639,6 +657,7 @@ def feed(text):
                         handle_marker(m.group(1), m.group(2))
                 i = end; continue
             i += 2; continue                                       # other ESC x -> drop
+        if SUP["on"]: i += 1; continue                             # inter-command prompt/echo — suppressed
         if ch == '\r': col = 0; i += 1; continue
         if ch == '\n': flush_line(); i += 1; continue
         if ch == '\b': col = max(0, col-1); i += 1; continue
@@ -700,6 +719,7 @@ __floo_precmd() {                                # FIRST in PROMPT_COMMAND: clos
   local ec=\$?
   __floo_on=                                      # so the rest of PROMPT_COMMAND is never seen as a cmd
   [ -n "\$__floo_active" ] && { __floo_osc "end;\$ec"; __floo_active=; }
+  __floo_osc "prompt"                             # mark the prompt so the renderer drops it + the echo
   return \$ec
 }
 __floo_arm() { local e=\$?; __floo_on=1; return \$e; }   # LAST in PROMPT_COMMAND: arm for the user's next line
@@ -725,7 +745,7 @@ RC
 __floo_osc() { printf '\033]1337;floo;${nonce};%s\007' "\$1" }
 __floo_ran=
 __floo_preexec() { __floo_ran=1; __floo_osc "cmd;\$(print -rn -- "\$1" | base64 | tr -d '\n')"; __floo_osc "out" }
-__floo_precmd() { local ec=\$?; [[ -n \$__floo_ran ]] && { __floo_osc "end;\$ec"; __floo_ran= }; }
+__floo_precmd() { local ec=\$?; [[ -n \$__floo_ran ]] && { __floo_osc "end;\$ec"; __floo_ran= }; __floo_osc "prompt" }
 if autoload -Uz add-zsh-hook 2>/dev/null; then
   add-zsh-hook preexec __floo_preexec
   add-zsh-hook precmd  __floo_precmd
@@ -741,20 +761,20 @@ RC
 }
 
 # ─── Write a readable command-log ALONGSIDE the raw recording. ───────────────────────────
-# For each raw `<stamp>.log` (the exact tee'd pty bytes) we write a sibling `<stamp>.txt` rendered
+# For each raw `session.raw` (the exact tee'd pty bytes) we write a readable `session.log` rendered
 # through the SAME renderer the live console uses (markers -> "$ command", escapes collapsed). The
-# raw .log is left UNTOUCHED: it is the complete, tamper-evident record. The live pane and the .txt
-# render the session the way a terminal would (control sequences, incl. OSC bodies, are not shown —
-# exactly as a terminal wouldn't show them), so a determined operator can obscure the *rendered*
-# view; the raw .log still holds every byte for after-the-fact review.
+# raw `.raw` is left UNTOUCHED: it is the complete, tamper-evident record. The readable `.log` (and
+# the live pane) render the session the way a terminal would (control sequences, incl. OSC bodies,
+# are not shown — exactly as a terminal wouldn't show them), so a determined operator can obscure
+# the *rendered* view; the raw `.raw` still holds every byte for after-the-fact review.
 clean_recordings() {
   local d="$1"; [ -d "$d" ] || return 0
   command -v python3 >/dev/null 2>&1 || return 0
   write_render_py || return 0
   local f nonce; nonce="${FLOO_MARK_NONCE:-$MARK_NONCE}"
-  for f in "$d"/*.log; do
+  for f in "$d"/*.raw; do
     [ -f "$f" ] || continue
-    FLOO_MARK_NONCE="$nonce" python3 "$RENDER_PY" < "$f" > "${f%.log}.txt" 2>/dev/null || rm -f "${f%.log}.txt"
+    FLOO_MARK_NONCE="$nonce" python3 "$RENDER_PY" < "$f" > "${f%.raw}.log" 2>/dev/null || rm -f "${f%.raw}.log"
   done
 }
 
@@ -808,12 +828,12 @@ teardown() {
     fi
   fi
 
-  if [ "$CONNECT_LOGGED" = 1 ] || ls "$WORKDIR"/recording/*.log >/dev/null 2>&1; then
+  if [ "$CONNECT_LOGGED" = 1 ] || ls "$WORKDIR"/recording/*.raw >/dev/null 2>&1; then
     local keep="$HOME/.floo-last-session"; mkdir -p "$keep/recording" 2>/dev/null
-    cp "$WORKDIR"/recording/*.log "$keep/recording/" 2>/dev/null   # the raw, complete record
-    clean_recordings "$keep/recording"                             # writes readable .txt siblings
-    local rec; rec="$(ls -1t "$keep"/recording/*.txt 2>/dev/null | head -1)"
-    [ -n "$rec" ] && info "readable session log: ${B}$rec${X}  ${D}(complete raw recording: $keep/recording/*.log)${X}"
+    cp "$WORKDIR"/recording/*.raw "$keep/recording/" 2>/dev/null   # the raw, complete record
+    clean_recordings "$keep/recording"                             # renders the readable .log
+    local rec; rec="$(ls -1t "$keep"/recording/*.log 2>/dev/null | head -1)"
+    [ -n "$rec" ] && info "readable session log: ${B}$rec${X}  ${D}(complete raw recording: $keep/recording/*.raw)${X}"
   fi
 
   rm -rf "$WORKDIR" 2>/dev/null   # wipe the ephemeral keys + config
