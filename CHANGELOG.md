@@ -9,8 +9,8 @@
   second window to see activity, and can make an informed Ctrl-C.
 - Command boundaries are captured via injected bash/zsh hooks emitting invisible
   private-OSC markers; the `exec`/bot path emits the same markers (carrying the real
-  piped script, not the `bash -s` shuttle). Full-screen TUI apps collapse to a one-line
-  note rather than mirror.
+  piped script, not the `bash -s` shuttle). Full-screen TUI apps render inline (their
+  collapsed screen content), never hidden — see Security.
 - **Friend-to-friend over a public relay.** `floo --public --relay floo.kelstar.me
   --pin …` lets two people share recorded, revocable support with nothing to host — the
   operator connects with just the code. Self-hosting (CA mode) stays the default for
@@ -20,16 +20,22 @@
 - **Per-session marker nonce.** Every command marker is stamped with a secret
   per-session nonce; the renderer honours a marker only if the nonce matches. Operator
   command **output** can no longer forge a `$ command` line, hide a real command behind
-  a forged full-screen app, or smuggle escape sequences onto the client's screen (the
-  command label is fully control-sanitized; a forged alt-screen never blinds the parser
-  to real markers). The live pane is a transparency aid for a cooperating operator, not
-  a sandbox — see THREAT-MODEL residual #5.
-- **bash command capture rewritten** to read the full typed line from history, armed
-  only after `PROMPT_COMMAND` completes — so a user's custom `PROMPT_COMMAND` (the stock
-  Fedora/RHEL default) can no longer mislabel or hide the operator's real command, and
-  pipelines / compound commands are captured in full.
+  a forged full-screen app, or smuggle escape sequences onto the client's screen. The
+  command label is fully control-sanitized; the renderer never suppresses output on a
+  full-screen marker (suppression keyed on operator output could hide real output, so
+  full-screen apps render inline); a forged alt-screen never blinds the parser to real
+  markers. The live pane is a transparency aid for a cooperating operator, not a sandbox
+  — see THREAT-MODEL residual #5.
+- **bash command capture rewritten** as a distilled bash-preexec state machine: it reads
+  the full typed line from history and is armed only between the end of `PROMPT_COMMAND`
+  and the next command, so a custom `PROMPT_COMMAND` of ANY shape (string, **array** — the
+  stock Fedora/RHEL default — or function) can no longer mislabel, duplicate, or hide the
+  operator's real command, an empty Enter no longer emits a phantom command, and pipelines
+  / compound commands are captured in full. With shell history disabled or
+  `HISTCONTROL=ignorespace` it falls back to the first simple command rather than mislabel.
 - Renderer hardened: bounded escape/OSC scanning (no O(n²) on malformed input), no
-  stray-fragment leak on a bare ESC inside an OSC, and no leftover temp files.
+  stray-fragment leak on a bare ESC inside an OSC, no leftover temp files, and the live
+  render pipeline is fully reaped on teardown.
 
 ### Notes
 - No relay or wire-protocol change; CA and quick (no-cert) modes are unaffected. The

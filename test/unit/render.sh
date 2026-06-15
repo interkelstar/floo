@@ -42,47 +42,46 @@ grep -q 'rm -rf /' <<<"$out" && bad "FORGERY: wrong-nonce output forged a comman
 # (#4/#15) escapes inside a VALID cmd label must be stripped (no raw ESC reaches the client tty)
 out="$(render "$(m "cmd;$(b64 "$(printf 'x\033[999;1H\033[2KFORGED')")")" | cat -v)"
 { grep -q 'xFORGED' <<<"$out" && ! grep -q '\^\[' <<<"$out"; } && ok "escapes in the command label are stripped" || bad "raw escape survived in label: [$out]"
-# (#5) a forged alt-screen must NOT blind the parser to subsequent hooked markers
+# (#5) a forged alt-screen in OUTPUT must NOT hide subsequent hooked markers...
 RM="$(b64 'rm -rf /important')"
 out="$(render "$(m "cmd;$(b64 'vim x')")$(m out)\033[?1049h$(m "cmd;$RM")$(m out)\033[?1049l$(m 'end;0')")"
-grep -qx '$ rm -rf /important' <<<"$out" && ok "alt-screen blackout cannot hide a hooked command" || bad "alt-screen hid a hooked command: [$out]"
-
-echo "=== renderer: full-screen collapse ==="
-stream="$(m "cmd;$(b64 'vim /etc/hosts')")$(m out)\033[?1049hGARBAGE_REPAINT\033[?1049l$(m 'end;0')"
-out="$(render "$stream")"
-grep -q '▶ operator opened: vim /etc/hosts' <<<"$out" && ok "alt-screen enter collapses to one line" || bad "no collapse: [$out]"
-grep -q 'GARBAGE_REPAINT' <<<"$out" && bad "raw TUI repaint leaked into the log" || ok "TUI repaint suppressed"
-grep -q '◀ closed' <<<"$out" && ok "alt-screen exit prints closed" || bad "no close line: [$out]"
+grep -qx '$ rm -rf /important' <<<"$out" && ok "forged alt-screen cannot hide a hooked command" || bad "alt-screen hid a hooked command: [$out]"
+# ...and must NOT hide subsequent OUTPUT either (the renderer never suppresses on output bytes)
+out="$(render "$(m "cmd;$(b64 'cat f')")$(m out)visible-before\n\033[?1049hSECRET_AFTER_ALT\nmore\n$(m 'end;0')")"
+{ grep -qx 'visible-before' <<<"$out" && grep -q 'SECRET_AFTER_ALT' <<<"$out" && grep -qx 'more' <<<"$out"; } \
+  && ok "forged alt-screen cannot hide subsequent OUTPUT (live or saved)" || bad "alt-screen hid output: [$out]"
+# the alt-screen toggle itself is consumed as a no-op CSI (no raw 1049h leaks as text)
+grep -q '1049' <<<"$out" && bad "raw alt-screen sequence leaked as text" || ok "alt-screen toggle consumed, not leaked"
 
 echo "=== degradation: renderer is a no-op-safe filter without markers ==="
 out="$(render 'just plain output\nsecond line\n')"
 grep -qx 'just plain output' <<<"$out" && grep -qx 'second line' <<<"$out" \
   && ok "marker-less stream renders as plain lines (heuristic rung)" || bad "plain fallback broken: [$out]"
 
-# decode every cmd marker a hooked shell emits and assert it equals the TYPED command (not the
-# PROMPT_COMMAND body, not a truncated pipeline). This is the assertion whose absence let the
-# mis-capture bug ship. Driven through a REAL pty with a user PROMPT_COMMAND set.
-hook_captures() {  # <shell> -> prints the decoded commands the client would see, one per line
-  local sh="$1" rc home
-  rc="$(mktemp)"; "$FLOO" --emit-hook "$sh" "$N" > "$rc"
-  home="$(mktemp -d)"
-  printf 'PROMPT_COMMAND='\''printf "\\033]0;%%s\\007" "$PWD"'\''\n' > "$home/.bashrc"
-  printf 'precmd(){ true; }\n' > "$home/.zshrc"
-  FLOO_HOOK_RC="$rc" FLOO_HOOK_HOME="$home" FLOO_HOOK_SHELL="$sh" FLOO_HOOK_NONCE="$N" python3 - <<'PY'
-import os,pty,base64,re,time,sys
-rc=os.environ['FLOO_HOOK_RC']; home=os.environ['FLOO_HOOK_HOME']
-sh=os.environ['FLOO_HOOK_SHELL']; nonce=os.environ['FLOO_HOOK_NONCE']
+# Drive a REAL interactive shell through a pty and DECODE the cmd markers — the assertion whose
+# absence let the mis-capture bug ship. Parameterized over the user's rc body and the typed lines
+# (an empty arg = a bare Enter), so we can exercise the hard PROMPT_COMMAND shapes.
+# usage: hook_captures <shell> <rc-body> <line> [line ...]  -> decoded commands, one per line
+hook_captures() {
+  local sh="$1" body="$2"; shift 2
+  local rc home; rc="$(mktemp)"; "$FLOO" --emit-hook "$sh" "$N" > "$rc"
+  home="$(mktemp -d)"; printf '%s\n' "$body" > "$home/.bashrc"; printf '%s\n' "$body" > "$home/.zshrc"
+  FLOO_HK_RC="$rc" FLOO_HK_HOME="$home" FLOO_HK_SH="$sh" FLOO_HK_N="$N" \
+  FLOO_HK_LINES="$(printf '%s\x1f' "$@")" python3 - <<'PY'
+import os,pty,base64,re,time
+rc=os.environ['FLOO_HK_RC']; home=os.environ['FLOO_HK_HOME']; sh=os.environ['FLOO_HK_SH']; nonce=os.environ['FLOO_HK_N']
+lines=os.environ['FLOO_HK_LINES'].split('\x1f')
+if lines and lines[-1]=='': lines.pop()
 pid,fd=pty.fork()
 if pid==0:
     os.environ['HOME']=home
     if sh=='bash': os.execvp('bash',['bash','--rcfile',rc,'-i'])
     else:
-        os.environ['ZDOTDIR']=os.path.dirname(rc); os.environ['__FLOO_REAL_ZDOTDIR']='/nonexistent'
-        # zsh reads .zshrc from ZDOTDIR; put our hook there
-        open(os.path.join(os.path.dirname(rc),'.zshrc'),'w').write(open(rc).read())
+        zd=os.path.dirname(rc); os.environ['ZDOTDIR']=zd; os.environ['__FLOO_REAL_ZDOTDIR']='/nonexistent'
+        open(os.path.join(zd,'.zshrc'),'w').write(open(rc).read())
         os.execvp('zsh',['zsh','-i'])
-for c in [b'echo ALPHA\n', b'true | cat | cat\n', b'exit\n']:
-    os.write(fd,c); time.sleep(0.5)
+for c in lines+['exit']:
+    os.write(fd,(c+'\n').encode()); time.sleep(0.35)
 buf=b''
 try:
     while True:
@@ -97,17 +96,25 @@ PY
   rm -rf "$rc" "$home"
 }
 
-echo "=== hook rcfile: bash (captures the RIGHT command, despite a custom PROMPT_COMMAND) ==="
-caps="$(hook_captures bash)"
-grep -qx 'echo ALPHA' <<<"$caps" && ok "bash hook captures the typed command" || bad "bash captured wrong: [$caps]"
-grep -qx 'true | cat | cat' <<<"$caps" && ok "bash hook captures the FULL pipeline" || bad "bash truncated pipeline: [$caps]"
-grep -q 'PROMPT_COMMAND\|printf .*033]0' <<<"$caps" && bad "bash leaked the PROMPT_COMMAND body" || ok "bash does NOT leak the PROMPT_COMMAND body"
+echo "=== hook rcfile: bash (correct capture across hard PROMPT_COMMAND shapes) ==="
+# string PROMPT_COMMAND + a bare Enter between two commands (the empty-line duplicate case)
+caps="$(hook_captures bash 'PROMPT_COMMAND='\''printf "\033]0;x\007"'\''' 'echo ALPHA' '' 'true | cat | cat')"
+grep -qx 'echo ALPHA' <<<"$caps" && ok "bash captures the typed command" || bad "bash captured wrong: [$caps]"
+grep -qx 'true | cat | cat' <<<"$caps" && ok "bash captures the FULL pipeline" || bad "bash truncated pipeline: [$caps]"
+[ "$(grep -cx 'echo ALPHA' <<<"$caps")" = 1 ] && ok "bash: empty line does NOT duplicate the prior command" || bad "bash duplicated on empty line: [$caps]"
+grep -q 'PROMPT_COMMAND\|033]0\|printf ' <<<"$caps" && bad "bash leaked the PROMPT_COMMAND body" || ok "bash does NOT leak the PROMPT_COMMAND body"
+# ARRAY PROMPT_COMMAND (modern Fedora default shape) — must not clobber it or mislabel
+caps="$(hook_captures bash 'PROMPT_COMMAND=('\''printf "\033]0;x\007"'\'')' 'echo BETA')"
+grep -qx 'echo BETA' <<<"$caps" && ok "bash handles an ARRAY PROMPT_COMMAND" || bad "array PROMPT_COMMAND broke capture: [$caps]"
+# HISTCONTROL=ignorespace + a space-prefixed command must NOT be mislabeled as the previous one
+caps="$(hook_captures bash 'HISTCONTROL=ignorespace' 'echo FIRST' ' echo SPACED_SECOND')"
+grep -q 'echo SPACED_SECOND' <<<"$caps" && ok "bash labels a space-prefixed cmd correctly (no prior-cmd mislabel)" || bad "ignorespace mislabel: [$caps]"
 
 echo "=== hook rcfile: zsh ==="
 if command -v zsh >/dev/null 2>&1; then
-  caps="$(hook_captures zsh)"
-  grep -qx 'echo ALPHA' <<<"$caps" && ok "zsh hook captures the typed command" || bad "zsh captured wrong: [$caps]"
-  grep -qx 'true | cat | cat' <<<"$caps" && ok "zsh hook captures the full pipeline" || bad "zsh pipeline: [$caps]"
+  caps="$(hook_captures zsh 'precmd(){ true; }' 'echo ALPHA' '' 'true | cat | cat')"
+  grep -qx 'echo ALPHA' <<<"$caps" && ok "zsh captures the typed command" || bad "zsh captured wrong: [$caps]"
+  grep -qx 'true | cat | cat' <<<"$caps" && ok "zsh captures the full pipeline" || bad "zsh pipeline: [$caps]"
 else
   ok "zsh not installed - skipping zsh hook test"
 fi

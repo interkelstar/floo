@@ -53,10 +53,12 @@ gives the same read-only view if you prefer.)
 
 ### What you'll see
 
-The live view is a command log, not a screen-share. Normal commands appear as `$ command` followed by
-their text output. Full-screen tools such as `vim`, `less`, or `top` are collapsed to an "opened" /
-"closed" note so they cannot take over the status row. The saved recording under
-`~/.floo-last-session/recording/` is cleaned for reading on exit.
+The live view is a command log, not a screen-share. Each command appears as `$ command` followed by
+its text output, rendered through a small terminal emulator that strips control sequences (so nothing
+the operator runs can take over the status row). Full-screen tools (`vim`, `less`, `top`) render inline
+as their collapsed screen content — they are deliberately **not** hidden or summarized away, because any
+"collapse on a full-screen marker" keyed off operator output could be used to hide real output from you.
+The saved recording under `~/.floo-last-session/recording/` is the same rendered log, cleaned on exit.
 
 ### Don't trust us — read us
 
@@ -103,8 +105,10 @@ floo-powder --relay vps.example.com --pin <fp> connect <code>
 ```
 
 When you open an interactive shell, the client sees a live command log in their `floo` window. Bash and
-zsh sessions get exact command boundaries through invisible shell markers; other shells still show a
-cleaned output stream. Non-interactive `floo-powder exec` uses the same command markers.
+zsh sessions get exact command boundaries through invisible, nonce-stamped shell markers (the bash hook
+reads the full typed line and is robust to any `PROMPT_COMMAND` shape; if the operator has shell history
+disabled or `HISTCONTROL=ignorespace`, it falls back to the first simple command rather than mislabel).
+Other shells still show a cleaned output stream. Non-interactive `floo-powder exec` uses the same markers.
 
 `floo-powder init` prints the exact one-liner (and an importable config blob) to hand to clients. The
 relay is a dedicated, isolated `sshd` serving a single powerless `gw` account; it splices ciphertext and

@@ -522,7 +522,6 @@ MAXSEQ = 1 << 16   # abandon an unterminated escape/OSC longer than this (anti-D
 out = sys.stdout
 cur = []
 col = 0
-state = {"lastcmd": "", "alt": False}
 decoder = codecs.getincrementaldecoder('utf-8')('replace')
 def emit(line):
     out.write(line.rstrip() + "\n"); out.flush()
@@ -561,7 +560,6 @@ def handle_marker(kind, arg):
         try: raw = base64.b64decode(arg or "").decode('utf-8', 'replace')
         except Exception: raw = arg or ""
         cmd = sanitize_label(raw)
-        state["lastcmd"] = cmd.replace('\n', ' ').strip()
         lines = cmd.split('\n')
         emit("$ " + lines[0])
         for extra in lines[1:]:
@@ -576,48 +574,35 @@ def feed(text):
     global col
     i = 0; n = len(text)
     while i < n:
-        # hold a partial alt-screen toggle that straddles the buffer end
-        held = None
-        for seq in ('\x1b[?1049h', '\x1b[?1049l'):
-            if n - i < len(seq) and seq.startswith(text[i:]): held = text[i:]
-        if held is not None: return held
-        if text.startswith('\x1b[?1049h', i):
-            if not state["alt"]:
-                state["alt"] = True
-                if cur: flush_line()
-                emit("▶ operator opened: " + (state["lastcmd"] or "a full-screen app"))
-            i += len('\x1b[?1049h'); continue
-        if text.startswith('\x1b[?1049l', i):
-            if state["alt"]:
-                state["alt"] = False
-                emit("◀ closed")
-            i += len('\x1b[?1049l'); continue
         ch = text[i]
         if ch == '\x1b':
             if i+1 >= n: return text[i:]
             nxt = text[i+1]
-            if nxt == '[':                                        # CSI
+            if nxt == '[':                                        # CSI — applied via the line emulator
                 j = i+2
                 while j < n and text[j] in '0123456789;?': j += 1
                 while j < n and ' ' <= text[j] <= '/': j += 1
                 if j >= n:
                     if n - i > MAXSEQ: i = n; break                # runaway: abandon
                     return text[i:]
-                if not state["alt"]:                               # in alt mode, consume but ignore
-                    f = text[j]; p = re.sub(r'\?', '', text[i+2:j])
-                    nums = [int(x) for x in p.split(';') if x.isdigit()] or [0]
-                    if f == 'K':
-                        m = nums[0]
-                        if m == 0: del cur[col:]
-                        elif m == 1:
-                            for k in range(min(col+1, len(cur))): cur[k] = ' '
-                        else: cur[:] = []
-                    elif f == 'C': col += (nums[0] or 1)
-                    elif f == 'D': col = max(0, col-(nums[0] or 1))
-                    elif f == 'G': col = max(0, (nums[0] or 1)-1)
-                    elif f in ('H', 'f'): col = 0
+                f = text[j]; p = re.sub(r'\?', '', text[i+2:j])
+                nums = [int(x) for x in p.split(';') if x.isdigit()] or [0]
+                if f == 'K':
+                    m = nums[0]
+                    if m == 0: del cur[col:]
+                    elif m == 1:
+                        for k in range(min(col+1, len(cur))): cur[k] = ' '
+                    else: cur[:] = []
+                elif f == 'C': col += (nums[0] or 1)
+                elif f == 'D': col = max(0, col-(nums[0] or 1))
+                elif f == 'G': col = max(0, (nums[0] or 1)-1)
+                elif f in ('H', 'f'): col = 0
+                # NB: full-screen apps (alt-screen ?1049h/l, absolute row moves) are NOT collapsed or
+                # suppressed — suppression keyed on operator-controlled output bytes could hide real
+                # output from the watching client and from the saved recording. We render everything;
+                # the command's own "$ <cmd>" marker already tells the client what opened.
                 i = j+1; continue
-            if nxt == ']':                                         # OSC — markers honored even in alt
+            if nxt == ']':                                         # OSC — only NONCE-valid floo markers act
                 j = i+2
                 while j < n and text[j] not in '\x07\x1b': j += 1
                 if j >= n:
@@ -636,8 +621,6 @@ def feed(text):
                         handle_marker(m.group(1), m.group(2))
                 i = end; continue
             i += 2; continue                                       # other ESC x -> drop
-        if state["alt"]:                                           # suppress ordinary output during a TUI
-            i += 1; continue
         if ch == '\r': col = 0; i += 1; continue
         if ch == '\n': flush_line(); i += 1; continue
         if ch == '\b': col = max(0, col-1); i += 1; continue
@@ -667,9 +650,12 @@ render_stream() {
 }
 
 # ─── Shell hooks: make the operator's shell announce each command via invisible private-OSC. ──
-# Markers carry the per-session NONCE (arg 2) so command output cannot forge them. The bash hook
-# captures the FULL typed command line from history (not $BASH_COMMAND, which is only the first
-# simple command AND mis-fires on a user PROMPT_COMMAND), armed only after PROMPT_COMMAND finishes.
+# Markers carry the per-session NONCE (arg 2) so command output cannot forge them. The capture is a
+# distilled bash-preexec: arm ONLY between the end of PROMPT_COMMAND and the next command, so neither
+# PROMPT_COMMAND's own commands (any shape — string, array, function, multi-statement) nor later
+# pipeline stages are mistaken for the user's command. The command text is the full typed line from
+# history; if history did not advance (HISTCONTROL=ignorespace / history off) we fall back to
+# BASH_COMMAND so a command can never be silently mislabeled as a prior one.
 floo_hook_rc() {
   local nonce="${2:-}"
   case "$1" in
@@ -678,26 +664,32 @@ floo_hook_rc() {
 [ -r /etc/bash.bashrc ] && . /etc/bash.bashrc
 [ -r "\$HOME/.bashrc" ] && . "\$HOME/.bashrc"
 __floo_osc() { printf '\033]1337;floo;${nonce};%s\007' "\$1"; }
-__floo_armed=; __floo_ran=
-__floo_preexec() {
-  [ -n "\${COMP_LINE:-}" ] && return            # readline completion, not a command
-  [ -z "\$__floo_armed" ] && return             # PROMPT_COMMAND is running, or a later pipeline stage
-  case "\$BASH_COMMAND" in __floo_*) return;; esac
-  __floo_armed=; __floo_ran=1                    # disarm for the rest of THIS command line
-  local line; line=\$(HISTTIMEFORMAT= builtin history 1 2>/dev/null)
-  line=\${line#"\${line%%[![:space:]]*}"}        # ltrim
-  line=\${line#*[[:space:]]}                      # drop the history index number
-  line=\${line#"\${line%%[![:space:]]*}"}        # ltrim again -> the full typed command line
-  __floo_osc "cmd;\$(printf '%s' "\$line" | base64 | tr -d '\n')"
+__floo_on=; __floo_active=; __floo_hist=
+__floo_preexec() {                               # DEBUG: fires before every simple command
+  [ -n "\${COMP_LINE:-}" ] && return             # readline completion, not a command
+  [ -z "\$__floo_on" ] && return                 # inside PROMPT_COMMAND / a later pipeline stage / startup
+  case "\$BASH_COMMAND" in __floo_preexec|__floo_precmd|__floo_arm) return;; esac
+  __floo_on=; __floo_active=1                     # consume the arm for the rest of THIS command line
+  local h n cmd
+  h=\$(HISTTIMEFORMAT= builtin history 1 2>/dev/null)
+  h=\${h#"\${h%%[0-9]*}"}; n=\${h%%[![:digit:]]*}; cmd=\${h#"\$n"}
+  cmd=\${cmd#"\${cmd%%[![:space:]]*}"}            # the full typed command line
+  if [ -n "\$n" ] && [ "\$n" != "\$__floo_hist" ]; then __floo_hist=\$n; else cmd=\$BASH_COMMAND; fi
+  __floo_osc "cmd;\$(printf '%s' "\$cmd" | base64 | tr -d '\n')"
   __floo_osc "out"
 }
-__floo_precmd() {                                # runs FIRST in PROMPT_COMMAND
+__floo_precmd() {                                # FIRST in PROMPT_COMMAND: close prior cmd + disarm
   local ec=\$?
-  [ -n "\$__floo_ran" ] && { __floo_osc "end;\$ec"; __floo_ran=; }
+  __floo_on=                                      # so the rest of PROMPT_COMMAND is never seen as a cmd
+  [ -n "\$__floo_active" ] && { __floo_osc "end;\$ec"; __floo_active=; }
   return \$ec
 }
-__floo_arm() { __floo_armed=1; }                 # runs LAST in PROMPT_COMMAND -> arm for the user's next line
-PROMPT_COMMAND="__floo_precmd\${PROMPT_COMMAND:+; \$PROMPT_COMMAND}; __floo_arm"
+__floo_arm() { local e=\$?; __floo_on=1; return \$e; }   # LAST in PROMPT_COMMAND: arm for the user's next line
+if [[ "\$(declare -p PROMPT_COMMAND 2>/dev/null)" == "declare -a"* ]]; then
+  PROMPT_COMMAND=(__floo_precmd "\${PROMPT_COMMAND[@]}" __floo_arm)   # preserve an ARRAY PROMPT_COMMAND
+else
+  PROMPT_COMMAND="__floo_precmd\${PROMPT_COMMAND:+; \$PROMPT_COMMAND}; __floo_arm"
+fi
 trap '__floo_preexec' DEBUG
 RC
     ;;
@@ -747,7 +739,9 @@ teardown() {
   info "closing the support session…"
   # kill whole process groups (negative pid) so no forked sshd/ssh child is orphaned
   [ -n "$MONITOR_PID" ] && kill "$MONITOR_PID" 2>/dev/null
-  [ -n "$RENDER_PY" ] && pkill -f "$RENDER_PY" 2>/dev/null   # reap the tail|renderer pipeline
+  # reap the live render pipeline (tail -F | renderer). RENDER_PY is set only inside the
+  # backgrounded render_console subshell, so match on the unique session WORKDIR instead.
+  [ -n "$WORKDIR" ] && { pkill -f "$WORKDIR/render.py" 2>/dev/null; pkill -f "$WORKDIR/recording" 2>/dev/null; }
   [ -n "$BINDWATCH_PID" ] && kill "$BINDWATCH_PID" 2>/dev/null
   [ -n "$TUNNEL_PID" ] && kill -TERM "-$TUNNEL_PID" 2>/dev/null
   [ -n "$SSHD_PID" ]   && kill -TERM "-$SSHD_PID"   2>/dev/null

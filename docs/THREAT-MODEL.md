@@ -48,14 +48,17 @@
    otherwise hijack — and a teardown could kill — that session). Where util-linux `script` is present,
    the pty is recorded; otherwise the Python relay records the pty if python3 is available. If neither is
    available, the disclosure for an interactive session degrades to the `sessions.log` entry + the
-   before/after state-diff. Bash/zsh hooks add exact command boundaries; other shells still produce a
+   before/after state-diff. Bash/zsh hooks add exact command boundaries (the bash hook reads the full
+   typed line and handles any PROMPT_COMMAND shape; with history disabled / HISTCONTROL=ignorespace it
+   falls back to the first simple command rather than mislabel); other shells still produce a
    cleaned output stream. Teardown kills the sshd by its own PID file, never a process-name pattern.
 5. **The live command log is integrity-checked against output forgery, but is not a sandbox.** Each
    session mints a *secret per-session marker nonce*; the injected bash/zsh hooks and the `exec` recorder
    stamp every command marker with it, and the renderer honours a marker **only** if the nonce matches.
    Command **output** — which the operator fully controls — therefore cannot forge a `$ command` line,
-   cannot hide a real command behind a fabricated full-screen app (a forged alt-screen never blinds the
-   renderer to nonce-valid markers), and cannot smuggle raw escape sequences onto the client's screen (the
+   cannot hide a command or its output behind a fabricated full-screen app (the renderer never suppresses
+   output on a full-screen marker — it renders everything — and a forged alt-screen never blinds it to
+   nonce-valid markers), and cannot smuggle raw escape sequences onto the client's screen (the
    command label is stripped of all control sequences before display). What remains: an operator with an
    *interactive* shell runs as the client's own user and can read the session's own files (the recording,
    the hook rc) to recover the nonce, or simply unset the hooks / start an unhooked shell. So the **live**
