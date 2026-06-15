@@ -399,10 +399,11 @@ monitor() {
       seen="$now"; idle=0
       [ "$shown" = 0 ] && { printf '%s● a technician is connected%s\n' "$G" "$X"; shown=1; CONNECT_LOGGED=1; }
     elif [ "$shown" = 1 ]; then
-      # collapse a burst of quick commands into one "connected … finished"; announce departure
-      # only after ~8s with no live session and no new one starting.
+      # the operator stepped away (a bot operator runs many brief connections with gaps). Don't say
+      # "finished" — that nudges the client to close mid-operation. Only after a long idle, and only
+      # ever as "session still open". (Mirrors render_console's idle line; 30s avoids flapping.)
       idle=$((idle + 1))
-      [ "$idle" -ge 8 ] && { printf '%s○ technician finished — press Ctrl-C to close, or leave open if they reconnect%s\n' "$D" "$X"; shown=0; idle=0; }
+      [ "$idle" -ge 30 ] && { printf '%s○ support session open · technician stepped away (still recording) — Ctrl-C only when you are done%s\n' "$D" "$X"; shown=0; idle=0; }
     fi
     sleep 1
   done

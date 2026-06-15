@@ -67,7 +67,7 @@
    controls — therefore cannot forge a `$ command` line, and cannot smuggle raw escape sequences onto the
    client's screen (the command label and all output are stripped of control sequences, C0 and 8-bit C1,
    and the cursor column is clamped so no escape can balloon the buffer). The rendered views — the live
-   pane and the saved readable `<stamp>.log` — render the session the way a **terminal** would: a terminal
+   pane and the saved readable `session.log` — render the session the way a **terminal** would: a terminal
    does not display control-sequence bodies (e.g. an OSC string), and neither do we, so a *determined*
    operator can obscure the **rendered** view (wrap output in a control sequence, unset the hooks, run an
    unhooked shell, or read the session's own files to recover the nonce). That is expected: the rendered
