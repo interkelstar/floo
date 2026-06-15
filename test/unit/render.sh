@@ -143,14 +143,20 @@ grep -q '1;.*r' <<<"$frame" && ok "sets a DECSTBM scroll region" || bad "no scro
 grep -q 'waiting for the technician' <<<"$frame" && ok "paints the waiting status" || bad "no status line: [$frame]"
 grep -qE '\^\[\[r' <<<"$frame" && ok "restores the full scroll region on teardown" || bad "no region reset: [$frame]"
 
-echo "=== saved recording cleanup (renders markers to \$ cmd, strips raw OSC) ==="
+echo "=== saved recording: raw .log preserved, readable .txt rendered alongside ==="
 CD="$(mktemp -d)"
-printf '%b' "before\n$(m "cmd;$(b64 'echo hidden')")$(m out)visible\n$(m 'end;0')" > "$CD/session.log"
+# raw .log includes a non-floo OSC wrapping output (the hide vector) — it MUST survive in the raw copy
+printf '%b' "before\n$(m "cmd;$(b64 'echo hidden')")$(m out)visible\n\033]666;WRAPPED_SECRET\007after\n$(m 'end;0')" > "$CD/session.log"
+raw_before="$(cat "$CD/session.log")"
 FLOO_TESTING=1 FLOO_MARK_NONCE="$N" "$FLOO" --clean-dir "$CD" 2>/dev/null
-cleaned="$(cat "$CD/session.log")"
-grep -q '1337;floo' <<<"$cleaned" && bad "cleaned recording leaked raw floo OSC markers" || ok "cleaned recording strips raw floo OSC markers"
-grep -qx '$ echo hidden' <<<"$cleaned" && ok "cleaned recording renders the command line" || bad "cleaned lost the command: [$cleaned]"
-grep -q 'visible' <<<"$cleaned" && ok "cleaned recording keeps real output" || bad "cleaned recording lost real output: [$cleaned]"
+# the raw .log is left UNTOUCHED (complete, tamper-evident — incl. the OSC-wrapped secret)
+[ "$(cat "$CD/session.log")" = "$raw_before" ] && ok "raw .log is left intact (complete record)" || bad "raw .log was modified"
+grep -q 'WRAPPED_SECRET' "$CD/session.log" && ok "raw .log preserves OSC-wrapped output (no evidence destruction)" || bad "raw lost the wrapped output"
+# the readable .txt is the rendered command-log
+txt="$(cat "$CD/session.txt" 2>/dev/null)"
+grep -q '1337;floo' <<<"$txt" && bad "readable .txt leaked raw floo OSC markers" || ok "readable .txt strips raw floo OSC markers"
+grep -qx '$ echo hidden' <<<"$txt" && ok "readable .txt renders the command line" || bad "readable lost the command: [$txt]"
+grep -q 'visible' <<<"$txt" && ok "readable .txt keeps shown output" || bad "readable lost shown output: [$txt]"
 rm -rf "$CD"
 
 echo "=== no temp-file leak from --render ==="

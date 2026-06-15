@@ -1,6 +1,17 @@
 # floo merged live console — design
 
 > Status: approved 2026-06-12. Target release: v0.5.0.
+>
+> **Amended during implementation (2026-06-13) — this design doc is historical.** Three things below
+> were superseded after adversarial security review; the code/README/THREAT-MODEL are authoritative:
+> 1. **Full-screen apps are NOT collapsed** to a "▶ opened / ◀ closed" one-liner. Suppressing output on
+>    an operator-controlled alt-screen byte could hide real output from the client and the recording, so
+>    the renderer renders everything inline. (The command's own `$ <cmd>` marker already names what opened.)
+> 2. **Markers carry a secret per-session nonce**; the renderer honours a marker only if it matches, so
+>    command *output* cannot forge/spoof the command log.
+> 3. **The saved recording is the complete raw byte stream** (`.log`); a readable rendered `.txt` is
+>    written beside it. The rendered views are terminal-faithful (not a containment boundary); the raw
+>    `.log` is the tamper-evident record.
 
 ## Goal
 

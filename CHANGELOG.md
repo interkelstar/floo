@@ -33,17 +33,21 @@
   operator's real command, an empty Enter no longer emits a phantom command, and pipelines
   / compound commands are captured in full. With shell history disabled or
   `HISTCONTROL=ignorespace` it falls back to the first simple command rather than mislabel.
-- Renderer hardened: bounded escape/OSC scanning (no O(n²) on malformed input), no
-  stray-fragment leak on a bare ESC inside an OSC, no leftover temp files, and the live
-  render pipeline is fully reaped on teardown.
+- Renderer hardened: cursor-column clamp + line wrap (no buffer balloon from a single
+  cursor escape), 8-bit C1 controls stripped (not just C0/7-bit), bounded escape/OSC
+  scanning (no O(n²)), no bare-ESC fragment leak, no leftover temp files.
+- **The saved recording is now the complete raw byte stream** (`<stamp>.log`, the
+  tamper-evident record — nothing dropped, so output a determined operator hid from the
+  rendered view is still there), with a readable rendered `<stamp>.txt` written beside it.
+  The rendered views (live pane + `.txt`) are terminal-faithful: like a terminal they do
+  not display control-sequence bodies, so they are a transparency aid, not a containment
+  boundary — see THREAT-MODEL residual #5.
+- `floo --watch` is a read-only second-window attach; it reaps only its own pipeline on
+  exit (scoped by child PID, so it can't disturb the client's own live pane).
 
 ### Notes
-- No relay or wire-protocol change; CA and quick (no-cert) modes are unaffected. The
-  saved recording is the rendered command-log (markers become `$ command` lines, raw
-  escapes stripped) via the same renderer the live pane uses. Non-bash/zsh shells
-  degrade to a cleaned line view; boxes without python3 fall back to the status line.
-- `floo --watch` still works as a read-only second-window attach, now reusing the
-  same console.
+- No relay or wire-protocol change; CA and quick (no-cert) modes are unaffected. Non-bash/zsh
+  shells degrade to a cleaned line view; boxes without python3 fall back to the status line.
 
 ## 0.4.0 — 2026-06-12
 - **no-cert (quick) mode** — a client can open a code-only session that any operator takes with just the

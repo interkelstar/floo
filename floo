@@ -459,8 +459,9 @@ render_console() {
   }
   local last_status="" nonce; nonce="$(cat "$dir/marknonce" 2>/dev/null)"
   trap '_con_setup; [ -n "${last_status:-}" ] && _con_status "$last_status"' WINCH
-  # reap the whole pipeline (the tail child outlives a bare `kill $rpid`), then restore the terminal
-  trap 'kill "$rpid" 2>/dev/null; pkill -f "tail.*$dir/recording" 2>/dev/null; _con_teardown; exit 0' INT TERM HUP
+  # reap THIS pane's pipeline (its own subshell children — NOT a system-wide pattern, which would
+  # also kill another pane watching the same session), then restore the terminal
+  trap 'pkill -P "$rpid" 2>/dev/null; kill "$rpid" 2>/dev/null; _con_teardown; exit 0' INT TERM HUP
   printf '\033[?25l'; _con_setup
   ( tail -n +1 -F "$dir"/recording/*.log 2>/dev/null | FLOO_MARK_NONCE="$nonce" render_stream ) &
   rpid=$!
@@ -481,7 +482,7 @@ render_console() {
     fi
     sleep 1
   done
-  pkill -f "tail.*$dir/recording" 2>/dev/null   # reap the tail if the pipeline ended on its own
+  pkill -P "$rpid" 2>/dev/null   # reap THIS pane's tail if the pipeline ended on its own
   _con_teardown
 }
 
@@ -677,7 +678,7 @@ __floo_on=; __floo_active=; __floo_hist=
 __floo_preexec() {                               # DEBUG: fires before every simple command
   [ -n "\${COMP_LINE:-}" ] && return             # readline completion, not a command
   [ -z "\$__floo_on" ] && return                 # inside PROMPT_COMMAND / a later pipeline stage / startup
-  case "\$BASH_COMMAND" in __floo_preexec|__floo_precmd|__floo_arm|__floo_runpc) return;; esac
+  case "\$BASH_COMMAND" in __floo_preexec|__floo_precmd|__floo_arm) return;; esac
   __floo_on=; __floo_active=1                     # consume the arm for the rest of THIS command line
   local h n cmd
   h=\$(HISTTIMEFORMAT= builtin history 1 2>/dev/null)
@@ -701,9 +702,11 @@ __floo_arm() { local e=\$?; __floo_on=1; return \$e; }   # LAST in PROMPT_COMMAN
 if [[ "\$(declare -p PROMPT_COMMAND 2>/dev/null)" == "declare -a"* ]]; then
   PROMPT_COMMAND=(__floo_precmd "\${PROMPT_COMMAND[@]}" __floo_arm)
 else
+  # eval the user's string at PROMPT_COMMAND top level: the surrounding parse can never break (eval
+  # takes its body as one string argument), and the body runs in the shell context so the user's
+  # positional params / shell state are preserved.
   __floo_user_pc=\$PROMPT_COMMAND
-  __floo_runpc() { [ -n "\$__floo_user_pc" ] && eval "\$__floo_user_pc"; return 0; }
-  PROMPT_COMMAND='__floo_precmd; __floo_runpc; __floo_arm'
+  PROMPT_COMMAND='__floo_precmd; eval "\$__floo_user_pc"; __floo_arm'
 fi
 trap '__floo_preexec' DEBUG
 RC
@@ -729,12 +732,13 @@ RC
   esac
 }
 
-# ─── Make a recording readable. ──────────────────────────────────────────────────────────
-# Runs each saved .log through the SAME renderer the live console uses: nonce-valid floo markers
-# become "$ command" lines and terminal control sequences collapse to the final visible text (a
-# full-screen app renders inline as its collapsed screen content — never hidden/suppressed). One
-# renderer for the live pane AND the saved log means they can never drift, and the saved recording
-# is the readable command-log rather than raw escapes.
+# ─── Write a readable command-log ALONGSIDE the raw recording. ───────────────────────────
+# For each raw `<stamp>.log` (the exact tee'd pty bytes) we write a sibling `<stamp>.txt` rendered
+# through the SAME renderer the live console uses (markers -> "$ command", escapes collapsed). The
+# raw .log is left UNTOUCHED: it is the complete, tamper-evident record. The live pane and the .txt
+# render the session the way a terminal would (control sequences, incl. OSC bodies, are not shown —
+# exactly as a terminal wouldn't show them), so a determined operator can obscure the *rendered*
+# view; the raw .log still holds every byte for after-the-fact review.
 clean_recordings() {
   local d="$1"; [ -d "$d" ] || return 0
   command -v python3 >/dev/null 2>&1 || return 0
@@ -742,8 +746,7 @@ clean_recordings() {
   local f nonce; nonce="${FLOO_MARK_NONCE:-$MARK_NONCE}"
   for f in "$d"/*.log; do
     [ -f "$f" ] || continue
-    FLOO_MARK_NONCE="$nonce" python3 "$RENDER_PY" < "$f" > "$f.floo.tmp" 2>/dev/null \
-      && mv "$f.floo.tmp" "$f" || rm -f "$f.floo.tmp"
+    FLOO_MARK_NONCE="$nonce" python3 "$RENDER_PY" < "$f" > "${f%.log}.txt" 2>/dev/null || rm -f "${f%.log}.txt"
   done
 }
 
@@ -753,11 +756,10 @@ teardown() {
   printf '\033[r\033[?25h' 2>/dev/null   # release any scroll region + show cursor
   echo
   info "closing the support session…"
-  # kill whole process groups (negative pid) so no forked sshd/ssh child is orphaned
-  [ -n "$MONITOR_PID" ] && kill "$MONITOR_PID" 2>/dev/null
-  # reap the live render pipeline (tail -F | renderer). RENDER_PY is set only inside the
-  # backgrounded render_console subshell, so match on the unique session WORKDIR instead.
-  [ -n "$WORKDIR" ] && { pkill -f "$WORKDIR/render.py" 2>/dev/null; pkill -f "$WORKDIR/recording" 2>/dev/null; }
+  # kill whole process groups (negative pid) so no forked sshd/ssh child is orphaned. Killing
+  # render_console (MONITOR_PID) fires its own signal trap, which scope-reaps ITS pipeline (tail +
+  # renderer) by child PID — so we never need a system-wide pattern kill that could hit another pane.
+  [ -n "$MONITOR_PID" ] && { kill "$MONITOR_PID" 2>/dev/null; wait "$MONITOR_PID" 2>/dev/null; }
   [ -n "$BINDWATCH_PID" ] && kill "$BINDWATCH_PID" 2>/dev/null
   [ -n "$TUNNEL_PID" ] && kill -TERM "-$TUNNEL_PID" 2>/dev/null
   [ -n "$SSHD_PID" ]   && kill -TERM "-$SSHD_PID"   2>/dev/null
@@ -800,10 +802,10 @@ teardown() {
 
   if [ "$CONNECT_LOGGED" = 1 ] || ls "$WORKDIR"/recording/*.log >/dev/null 2>&1; then
     local keep="$HOME/.floo-last-session"; mkdir -p "$keep/recording" 2>/dev/null
-    cp "$WORKDIR"/recording/*.log "$keep/recording/" 2>/dev/null
-    clean_recordings "$keep/recording"
-    local rec; rec="$(ls -1t "$keep"/recording/*.log 2>/dev/null | head -1)"
-    [ -n "$rec" ] && info "readable session recording: ${B}$rec${X}"
+    cp "$WORKDIR"/recording/*.log "$keep/recording/" 2>/dev/null   # the raw, complete record
+    clean_recordings "$keep/recording"                             # writes readable .txt siblings
+    local rec; rec="$(ls -1t "$keep"/recording/*.txt 2>/dev/null | head -1)"
+    [ -n "$rec" ] && info "readable session log: ${B}$rec${X}  ${D}(complete raw recording: $keep/recording/*.log)${X}"
   fi
 
   rm -rf "$WORKDIR" 2>/dev/null   # wipe the ephemeral keys + config

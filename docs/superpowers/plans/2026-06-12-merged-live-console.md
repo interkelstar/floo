@@ -1,5 +1,11 @@
 # floo Merged Live Console Implementation Plan
 
+> **Historical (2026-06-13).** Implemented + hardened well beyond this plan after adversarial review.
+> Superseded: full-screen apps are NOT collapsed (rendered inline — alt-screen suppression was a hide
+> vector); markers carry a per-session nonce (anti-forgery); the saved recording is the raw `.log` plus a
+> readable `.txt` sibling. See the code / README / docs/THREAT-MODEL (authoritative) and the design doc's
+> amendment banner.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Replace floo's two-window `monitor()`+`--watch` split with one default window — a scrolling command-log pane above a pinned status line — so a single-terminal client sees the operator act in real time and can make an informed Ctrl-C.

@@ -58,7 +58,9 @@ its text output, rendered through a small terminal emulator that strips control 
 the operator runs can take over the status row). Full-screen tools (`vim`, `less`, `top`) render inline
 as their collapsed screen content — they are deliberately **not** hidden or summarized away, because any
 "collapse on a full-screen marker" keyed off operator output could be used to hide real output from you.
-The saved recording under `~/.floo-last-session/recording/` is the same rendered log, cleaned on exit.
+On exit, the session is saved under `~/.floo-last-session/recording/`: the **`.log` is the complete raw
+recording** (the exact bytes — the tamper-evident record, holding everything even if a determined
+operator obscured the live view), and a readable rendered `.txt` is written beside it.
 
 ### Don't trust us — read us
 

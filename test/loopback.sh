@@ -191,12 +191,17 @@ fi
 CERT="$HOME/.config/floo/sessions/testbot/opkey-cert.pub"
 [ -f "$CERT" ] && ssh-keygen -Lf "$CERT" | grep -q 'Valid:.*to' && ok "operator cert is time-boxed (≤60m)" || note "cert file already cleaned"
 
-# ── 8. the SAVED (cleaned) recording is the rendered command-log; raw markers are gone ───
+# ── 8. saved recording: raw .log is the COMPLETE record; .txt is the readable rendered log ───
 KEEP="$THOME/.floo-last-session/recording"   # the client ran with HOME=$THOME
 if ls "$KEEP"/*.log >/dev/null 2>&1; then
-  grep -aq '1337;floo' "$KEEP"/*.log 2>/dev/null && bad "raw floo markers leaked into the cleaned recording" || ok "cleaned recording has no raw floo OSC markers"
-  grep -aq 'MARKER_42' "$KEEP"/*.log 2>/dev/null && ok "cleaned recording keeps the real output" || note "MARKER_42 absent in cleaned recording (timing)"
-  grep -aqE '^\$ ' "$KEEP"/*.log 2>/dev/null && ok "cleaned recording rendered a \$ command line (marker -> command-log)" || note "no \$ command line in cleaned recording"
+  grep -aq '1337;floo' "$KEEP"/*.log 2>/dev/null && ok "raw .log keeps the actual bytes (markers present — complete record)" || note "no markers in raw .log (timing)"
+  grep -aq 'MARKER_42' "$KEEP"/*.log 2>/dev/null && ok "raw .log preserves the real output" || note "MARKER_42 absent in raw .log (timing)"
+  if ls "$KEEP"/*.txt >/dev/null 2>&1; then
+    grep -aq '1337;floo' "$KEEP"/*.txt 2>/dev/null && bad "readable .txt leaked raw floo markers" || ok "readable .txt strips raw floo OSC markers"
+    grep -aqE '^\$ ' "$KEEP"/*.txt 2>/dev/null && ok "readable .txt rendered a \$ command line (marker -> command-log)" || note "no \$ command line in .txt"
+  else
+    note "no readable .txt produced (no python3?) — raw .log still complete"
+  fi
 else
   note "no ~/.floo-last-session recording saved — skipping cleaned-save check"
 fi

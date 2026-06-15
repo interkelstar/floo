@@ -54,20 +54,23 @@
    `$`-label since bash fires no hook for it, but is still visible in the recorded keystrokes and cannot
    hide or mislabel a later command); other shells still produce a cleaned output stream. Teardown kills
    the sshd by its own PID file, never a process-name pattern.
-5. **The live command log is integrity-checked against output forgery, but is not a sandbox.** Each
-   session mints a *secret per-session marker nonce*; the injected bash/zsh hooks and the `exec` recorder
-   stamp every command marker with it, and the renderer honours a marker **only** if the nonce matches.
-   Command **output** — which the operator fully controls — therefore cannot forge a `$ command` line,
-   cannot hide a command or its output behind a fabricated full-screen app (the renderer never suppresses
-   output on a full-screen marker — it renders everything — and a forged alt-screen never blinds it to
-   nonce-valid markers), and cannot smuggle raw escape sequences onto the client's screen (the
-   command label is stripped of all control sequences before display). What remains: an operator with an
-   *interactive* shell runs as the client's own user and can read the session's own files (the recording,
-   the hook rc) to recover the nonce, or simply unset the hooks / start an unhooked shell. So the **live**
-   pane is trustworthy against output-borne forgery but is **not** a containment boundary against a
-   determined operator — it is a transparency aid for a cooperating-but-watched operator. The **raw
-   recording** (tee'd to the client's disk, marker-rendered and cleaned on save) remains the tamper-evident
-   record, and the Ctrl-C revoke + before/after state-diff are unchanged.
+5. **The live command log is integrity-checked against output forgery, but the rendered view is not a
+   sandbox — the raw recording is the tamper-evident record.** Each session mints a *secret per-session
+   marker nonce*; the bash/zsh hooks and the `exec` recorder stamp every command marker with it, and the
+   renderer honours a marker **only** if the nonce matches. Command **output** — which the operator fully
+   controls — therefore cannot forge a `$ command` line, and cannot smuggle raw escape sequences onto the
+   client's screen (the command label and all output are stripped of control sequences, C0 and 8-bit C1,
+   and the cursor column is clamped so no escape can balloon the buffer). The rendered views — the live
+   pane and the saved readable `<stamp>.txt` — render the session the way a **terminal** would: a terminal
+   does not display control-sequence bodies (e.g. an OSC string), and neither do we, so a *determined*
+   operator can obscure the **rendered** view (wrap output in a control sequence, unset the hooks, run an
+   unhooked shell, or read the session's own files to recover the nonce). That is expected: the rendered
+   view is a transparency aid for a cooperating-but-watched operator, **not** a containment boundary. The
+   guarantee that survives a hostile operator is the **raw recording**: `~/.floo-last-session/recording/
+   <stamp>.log` is the exact tee'd byte stream with **nothing dropped** — every command and every byte of
+   output, including anything hidden from the rendered view — so it is the after-the-fact tamper-evident
+   record. (The `.txt` beside it is the readable render.) The Ctrl-C revoke + before/after state-diff are
+   unchanged.
 6. **State-diff scope** is the three access surfaces (authorized_keys across readable homes, enabled
    systemd user+system units, user + system cron). It is a disclosure of *those* surfaces, not a full
    integrity scan; a deep `homenum-revelio` audit can be operator-pushed for more.
