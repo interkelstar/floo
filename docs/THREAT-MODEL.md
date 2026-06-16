@@ -38,6 +38,25 @@
    name socket (a squat, defeated by the pairing code) or resource use. Mitigations in place: charset
    validation on every name, lazy GC of dead sessions, connectability-gated routing. Not yet added:
    rate-limiting / fail2ban on the relay sshd — worth adding before serving many clients.
+   **What you trust a relay operator for (esp. a PUBLIC relay you don't run).** The session SSH is
+   end-to-end between the operator and the *client's own* sshd; the relay's pivot is an `nc -U` splice of
+   ciphertext, so a relay operator **cannot read a session that connects normally** (it holds none of the
+   ephemeral keys). The cleartext code never reaches the relay — only its SHA-256 hash (and, in quick mode,
+   `HMAC(code, opkey)`), both one-way over a ~65-bit code. A malicious relay **cannot transparently MITM**:
+   to relay onward to the real client it would have to authenticate *as the operator*, and it can't — in CA
+   mode the cert signature is bound to the SSH session id (non-replayable onto a second connection), and in
+   quick mode the relay only ever holds the operator's *public* ephemeral key (and can't forge a valid
+   `HMAC(code, ·)` for its own key without the code). The genuine residual: the relay is the **only source
+   of the client's host key** (the operator pins whatever `resolve` returns — there's no out-of-band channel
+   for it; only the *code* is read person-to-person). So a malicious relay can **impersonate the client** —
+   redirect the operator's pivot to a relay-controlled sshd presenting a substituted host key — and capture
+   what the **operator types**. But because it can't forward onward, this is an **incomplete, detectable
+   eavesdrop**: the *real* client never shows "● technician connected" and records nothing, and the operator
+   reaches a dead end. So a relay operator's actual powers are **denial of service**, **metadata** (IPs,
+   timing, labels, session ids, the code *hash*), and at worst a *detectable* one-sided eavesdrop — never
+   silent reading of a working session. For confidentiality against the relay host itself, self-host the
+   relay (then you are the relay operator). Quick mode adds no CA second factor, so treat the **code as a
+   credential**: an out-of-band code leak is full access until the window closes.
 3. **SIGKILL / power loss on the client** skips the graceful teardown, leaving a `localhost`-only sshd
    until reboot. It is **not reachable** (the tunnel and its relay socket are gone, so there is no inbound
    path), and a reboot clears it. Graceful exits (Ctrl-C / close / TERM / HUP) tear down fully.
