@@ -31,7 +31,7 @@
 set -uo pipefail
 umask 077   # everything we create (keys, config, recordings) is owner-only from birth
 
-FLOO_VERSION="0.5.2"
+FLOO_VERSION="0.5.3"
 
 # ─── The disclosure: the ONLY key that can enter. Public by design. ──────────────────────
 # This is a *public* key. Publishing it is safe and is the whole point: you read it and
@@ -203,10 +203,16 @@ if [ -n "${SSH_ORIGINAL_COMMAND:-}" ]; then
   in="$(cat)"
   NONCE="$(cat "$DIR/marknonce" 2>/dev/null)"
   __floo_osc() { printf '\033]1337;floo;%s;%s\007' "$NONCE" "$1" >> "$log"; }
-  # the cmd marker carries the ACTUAL piped script (SSH_ORIGINAL_COMMAND is just the literal
-  # `bash -s` shuttle). The renderer turns these markers into the readable command-log for BOTH
-  # the live view and the saved recording, so no separate human banner is needed.
-  __floo_osc "cmd;$(printf '%s' "$in" | base64 | tr -d '\n')"
+  # the cmd marker must carry the ACTUAL command. Two operator styles:
+  #   - `floo-powder exec` / `ssh host 'bash -s'`: SSH_ORIGINAL_COMMAND is the literal `bash -s` shuttle
+  #     and the real commands are the piped SCRIPT  -> label = $in.
+  #   - direct `ssh host '<command>'` (e.g. the stack-update flow): the command IS SSH_ORIGINAL_COMMAND,
+  #     and $in (if any) is just its stdin data    -> label = SSH_ORIGINAL_COMMAND.
+  case "$SSH_ORIGINAL_COMMAND" in
+    bash\ -s|bash\ -s\ *) __floo_label="$in" ;;
+    *)                    __floo_label="$SSH_ORIGINAL_COMMAND" ;;
+  esac
+  __floo_osc "cmd;$(printf '%s' "$__floo_label" | base64 | tr -d '\n')"
   __floo_osc "out"
   printf '%s' "$in" | { bash -c "$SSH_ORIGINAL_COMMAND"; } 2>&1 | tee -a "$log"
   rc="${PIPESTATUS[1]}"

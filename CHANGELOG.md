@@ -1,4 +1,15 @@
 # Changelog
+## 0.5.3 — 2026-06-17
+
+- **Direct-command sessions (`ssh <handle> '<cmd>'`) showed empty `$` lines instead of the command.**
+  Seen driving a stack update over floo: the live log was output with blank `$` headers. The v0.5.0
+  exec marker was built from the piped stdin (`$in`) to unmask the `floo-powder exec` `bash -s`
+  shuttle — but for a direct `ssh <handle> '<command>'` (the agents-deployed update flow) nothing is
+  piped, so `$in` is empty and every command rendered as a bare `$`. Fix: the marker now uses
+  `SSH_ORIGINAL_COMMAND` for a direct command and falls back to `$in` only for the `bash -s` shuttle.
+  New recorder unit asserts the marker = the real command for BOTH styles (the loopback only ever
+  exercised `floo-powder exec`).
+
 ## 0.5.2 — 2026-06-16
 
 - **Quick (no-cert) connect hung** before opening the shell. The quick-mode liveness probe

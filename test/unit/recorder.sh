@@ -29,6 +29,19 @@ grep -q 'R_42' <<<"$out" && ok "rsync-prefixed chain is recorded too" || bad "BY
 out="$(printf '' | run_rec 'scp -t /tmp/nonexistent_floo_xyz')"
 grep -q 'file transfer' <<<"$out" && ok "a pure transfer keeps the command-only fast path" || bad "pure transfer misclassified: [$out]"
 
+echo "=== recorder: the cmd marker reflects the ACTUAL command for BOTH operator styles ==="
+# decode the cmd marker(s) the recorder emits, given SSH_ORIGINAL_COMMAND + piped stdin
+cmd_marker(){ # $1=SSH_ORIGINAL_COMMAND ; stdin=piped -> echoes decoded command labels
+  local soc="$1" d; d="$(mktemp -d)"; mkdir -p "$d/recording" "$d/active"; printf testnonce > "$d/marknonce"; cp "$REC" "$d/record-session"
+  SSH_ORIGINAL_COMMAND="$soc" bash "$d/record-session" >/dev/null 2>&1
+  grep -aoP '1337;floo;testnonce;cmd;\K[A-Za-z0-9+/=]*' "$d"/recording/session.raw | while read -r b; do printf '%s' "$b" | base64 -d 2>/dev/null; echo; done
+  rm -rf "$d"
+}
+# direct `ssh <handle> '<command>'` (the stack-update flow): the command is SSH_ORIGINAL_COMMAND, no stdin
+[ "$(printf '' | cmd_marker 'id -un')" = 'id -un' ] && ok "direct 'ssh host id -un' marker = the real command (not empty)" || bad "direct-command marker wrong: [$(printf '' | cmd_marker 'id -un')]"
+# `floo-powder exec` / `bash -s` shuttle: the real commands are the piped script
+[ "$(printf 'uname -s' | cmd_marker 'bash -s')" = 'uname -s' ] && ok "bash -s shuttle marker = the piped script" || bad "bash -s marker wrong: [$(printf 'uname -s' | cmd_marker 'bash -s')]"
+
 echo "=== recorder: the quick-mode 'floo-probe' liveness token records NOTHING and never reads stdin ==="
 # even with data on stdin, the probe must exit immediately (before the cat that would otherwise block)
 out="$(printf 'STDIN_THAT_WOULD_BLOCK' | timeout 5 bash -c '
