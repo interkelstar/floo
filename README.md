@@ -29,14 +29,14 @@ Only when you want help. Whoever's helping you hands you a one-line command — 
 the pairing code it prints:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/interkelstar/floo/v0.5.3/floo \
+curl -fsSL https://raw.githubusercontent.com/interkelstar/floo/v0.6.0/floo \
   | bash -s -- --relay relay.example.com --pin 0123456789abcdef
 ```
 
 The `--pin` is a short fingerprint of the operator's relay. `floo` verifies the relay against it, then
 fetches the operator's key *from* the relay — so there are no long keys to paste (and nothing for a
 terminal to fold and corrupt). The URL is a version tag, so you run exactly the code you can read at
-`github.com/interkelstar/floo/tree/v0.5.3`.
+`github.com/interkelstar/floo/tree/v0.6.0`.
 
 …or, if you'll get support more than once, **install it and save your operator once**:
 
@@ -83,7 +83,7 @@ nothing else to clone and you can audit exactly what gets root. Fetch it, read i
 your relay:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/interkelstar/floo/v0.5.3/bin/floo-powder -o floo-powder
+curl -fsSL https://raw.githubusercontent.com/interkelstar/floo/v0.6.0/bin/floo-powder -o floo-powder
 less floo-powder                     # read it — incl. the embedded relay that `init` sudo-runs, inline + readable
 sh floo-powder install               # install into ~/.local/bin (self-fetches if piped)
 floo-powder init                     # turnkey: keys + stands up the embedded relay + prints the client one-liner
@@ -150,7 +150,7 @@ Helping a friend (or getting help) and neither of you wants to run a relay? Use 
 
 ```bash
 # the person who needs help (the client) runs this and reads back the code it prints:
-curl -fsSL https://raw.githubusercontent.com/interkelstar/floo/v0.5.3/floo \
+curl -fsSL https://raw.githubusercontent.com/interkelstar/floo/v0.6.0/floo \
   | bash -s -- --public --relay floo.kelstar.me --pin df2b83ff925f89bd
 
 # the person helping (the operator) installs floo-powder once, then connects with that code:

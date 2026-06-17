@@ -1,4 +1,55 @@
 # Changelog
+## 0.6.0 — 2026-06-17
+
+A hardening + simplification pass driven by a fresh adversarial multi-agent review (correctness,
+bugs, security, portability, docs, UX). Every fix below survived an independent skeptic.
+
+### Fixed — rendering / recording (the live command log)
+- **Direct `ssh host '<cmd>'` could still render a blank `$`.** The shuttle classifier matched the
+  wildcard `bash -s *`, so a direct `bash -s <args>` was mistaken for the `floo-powder exec` shuttle
+  and rendered an empty command. The recorder now classifies the shuttle **exactly** (`bash -s`) and
+  labels every other shape with its real command; the degenerate empty shuttle labels `bash -s`, never
+  an empty `$`. Direct commands now **stream** stdin to the child instead of slurping it (no
+  trailing-newline loss, no buffering a whole transfer in memory). Over-long command labels are
+  truncated so they can't render as base64 garbage (the full text is in the raw recording).
+- **Suppression could swallow real output.** Every operator connection appends to one shared
+  `session.raw`; a single global "suppress the prompt/echo" flag let one connection's `end`/`prompt`
+  eat a *concurrent* connection's output (and the file-transfer disclosure) in the live + readable
+  views. Suppression is now **prompt-only and self-limits at the next newline**, bounding any
+  cross-connection bleed to a single line; the raw recording was always complete.
+
+### Fixed — security & honesty
+- **Transfer fast-path could run an unrecorded program.** `scp -S <prog>` / `rsync --rsh=<prog>` (and
+  friends) matched the binary-transfer fast path and reached an un-teed `bash -c`. Such
+  command-executing options are now rejected from the fast path and fully teed+recorded; the
+  disclosure is emitted through the nonce marker channel so it can't be suppressed. (The benign
+  `rsync --server -e.iLsfxC` capability token still fast-paths.) THREAT-MODEL #4 updated to match.
+- **teardown no longer overclaims the revoke.** The "access revoked — endpoint is down" line was only
+  truthful when `ss` was installed; without it the strong claim printed unconditionally. A new
+  `port_bound()` confirms via `ss` *or* a bash `/dev/tcp` probe, and prints an honest weaker message
+  when neither can check — it never asserts a revoke it can't confirm.
+- THREAT-MODEL #2 now states the true anti-MITM mechanism (the relay can't extract the operator's
+  ephemeral private key from spliced ciphertext, so it can't re-authenticate as the operator).
+
+### Fixed — robustness / portability
+- Client resolves the `sshd` binary (sbin, off a normal user's PATH) instead of hardcoding
+  `/usr/sbin/sshd`; the missing-SSH error now names the install command for the user's distro.
+- Relay installer: `close_port` gains the missing `nft` branch (symmetric with `open_port`, deletes
+  the rule by handle or says it couldn't); `open_port` creates the `inet/filter/input` chain
+  idempotently; SELinux-Enforcing with `semanage` absent is detected and surfaced (and
+  `policycoreutils-python-utils` auto-installed) instead of failing the relay bind cryptically.
+
+### Changed — simpler & clearer (two binaries, accessible to everyone)
+- **Removed `--watch` and `--status`.** The merged live console (the default in-window view) replaced
+  the second-window `--watch`; both modes, `watch_attach`/`status_only`, the `watch.pid` plumbing, and
+  a dead `CONNECT_LOGGED` flag are gone. `render_console`'s vestigial `read_only` parameter collapsed.
+- `monitor()` (the no-python3 fallback) and `render_console` now share one `_session_active`
+  connect/idle detector; the no-python path gained its first test coverage (`test/unit/console.sh`).
+- One client-facing word — **"your helper"** — everywhere a non-technical user reads it (`operator` is
+  reserved for the operator CLI). `--public` drops the "NO-CERT mode" jargon headline; `floo-powder`
+  says "this is the genuine session (resolved at the relay)" rather than "connected"; the teardown
+  surface-diff gets one orienting sentence; the idle glyph is consistent across environments.
+
 ## 0.5.3 — 2026-06-17
 
 - **Direct-command sessions (`ssh <handle> '<cmd>'`) showed empty `$` lines instead of the command.**

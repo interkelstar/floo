@@ -29,7 +29,7 @@
 set -uo pipefail
 umask 077   # everything we create (keys, config, recordings) is owner-only from birth
 
-FLOO_VERSION="0.5.3"
+FLOO_VERSION="0.6.0"
 
 # ─── The disclosure: the ONLY key that can enter. Public by design. ──────────────────────
 # This is a *public* key. Publishing it is safe and is the whole point: you read it and
