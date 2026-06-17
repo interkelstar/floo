@@ -24,8 +24,6 @@
 # Usage:
 #   curl -fsSL https://raw.githubusercontent.com/interkelstar/floo/<commit>/floo | bash
 #   floo                 open a support session (default)
-#   floo --watch         attach a read-only live view to a session already running
-#   floo --status        print whether a session is currently open, then exit
 #   floo --help | --version
 #
 set -uo pipefail
@@ -76,7 +74,7 @@ resolve_name() {
   id -un
 }
 
-# stable, private, tmpfs-backed home for this session's state (enables --watch + a clean wipe)
+# stable, private, tmpfs-backed home for this session's state (so teardown can wipe it cleanly)
 session_dir() {
   local base="${XDG_RUNTIME_DIR:-}"
   # Fall back OFF world-writable /dev/shm: sshd's StrictModes refuses to read an
@@ -114,7 +112,7 @@ snapshot_surface() {
 
 # ─── Build the throwaway SSH endpoint (in tmpfs; nothing on durable disk). ────────────────
 WORKDIR=""; SSHD_PID=""; TUNNEL_PID=""; MONITOR_PID=""; BINDWATCH_PID=""; NAME=""; SID=""; SSHD_PORT=""
-PAIRCODE=""; BEFORE=""; AFTER=""; CONNECT_LOGGED=0; MARK_NONCE=""
+PAIRCODE=""; BEFORE=""; AFTER=""; MARK_NONCE=""
 
 build_endpoint() {
   mkdir -p "$WORKDIR/recording"
@@ -180,42 +178,57 @@ stamp="$(date -u +%Y%m%dT%H%M%SZ)-$$"
 log="$RECDIR/session.raw"
 { echo "=== floo session $stamp ==="; echo "from: ${SSH_CONNECTION:-?}"; echo "cmd : ${SSH_ORIGINAL_COMMAND:-<interactive shell>}"; echo; } >> "$log"
 if [ -n "${SSH_ORIGINAL_COMMAND:-}" ]; then
-  # non-interactive (audit/upgrade script piped in): put BOTH the commands AND their output in the
-  # ONE saved log. (Previously the input went to a separate .stdin file that teardown never saved,
-  # so the recording showed output with no commands.)
+  # non-interactive (an audit/upgrade script piped in, OR a direct `ssh host '<cmd>'`): put BOTH the
+  # commands AND their output in the ONE saved log, stamped with nonce markers so the live console can
+  # render them. Markers are defined HERE — before the transfer fast-path — so even a binary transfer's
+  # disclosure goes through the nonce channel and can never be swallowed by the renderer's suppression.
+  NONCE="$(cat "$DIR/marknonce" 2>/dev/null)"
+  __floo_osc() { printf '\033]1337;floo;%s;%s\007' "$NONCE" "$1" >> "$log"; }
+  __floo_mark_cmd() {   # emit a nonce-stamped `cmd` marker for label $1, TRUNCATED so a giant label
+                        # can't exceed the renderer's OSC scan bound and render as base64 garbage
+    local lbl="$1" max=4096
+    [ "${#lbl}" -gt "$max" ] && lbl="${lbl:0:$max}… [$(( ${#1} - max )) more bytes — see the raw recording]"
+    __floo_osc "cmd;$(printf '%s' "$lbl" | base64 | tr -d '\n')"
+  }
   case "$SSH_ORIGINAL_COMMAND" in
     rsync\ --server*|scp\ -*|*sftp-server*)
       # binary, bidirectional file transfer: buffering stdin + tee would DEADLOCK and corrupt the
-      # protocol (the "null byte" warning is the tell). Record the FACT (disclosure), pass it a
-      # clean channel — the unreadable byte stream isn't worth recording anyway. BUT only for a PURE
-      # transfer: if the command also chains/substitutes (;, &, |, backtick, $, <, >, newline) an
-      # operator could run arbitrary commands UNRECORDED behind a transfer-looking prefix, so those
-      # fall through to the normal teed-and-recorded path below.
+      # protocol (the "null byte" warning is the tell). Record the FACT through the marker channel and
+      # pass it a clean channel. BUT only for a GENUINE transfer: a command that (a) chains/substitutes
+      # shell metacharacters (;, &, |, backtick, $, <, >, newline), OR (b) carries a command-EXECUTING
+      # option of the transfer binary itself (scp -S/-o a program, rsync -e/--rsh/--rsync-path a program)
+      # is NOT a plain transfer — it can run code whose output we MUST record — so it falls through to
+      # the normal teed+marked path below instead of this unrecorded fast path. (`-e.iLsfxC`, the benign
+      # capability token a real `rsync --server` sends, is deliberately NOT matched: the guard keys on a
+      # program-bearing ` -e ` / ` -e/`, never ` -e.`.)
       case "$SSH_ORIGINAL_COMMAND" in
         *';'*|*'&'*|*'|'*|*'`'*|*'$'*|*'<'*|*'>'*|*'
 '*) : ;;
+        *' -S'*|*' -o'*|*' --rsh'*|*' --rsync-path'*|*' -e '*|*' -e/'*) : ;;
         *)
-          { echo "----- file transfer (binary — recorded as the command only) -----"; echo "$SSH_ORIGINAL_COMMAND"; } >> "$log"
-          bash -c "$SSH_ORIGINAL_COMMAND"; exit $? ;;
+          __floo_mark_cmd "file transfer (binary — recorded as the command only): $SSH_ORIGINAL_COMMAND"
+          bash -c "$SSH_ORIGINAL_COMMAND"; rc=$?; __floo_osc "end;$rc"; exit "$rc" ;;
       esac
       ;;
   esac
-  in="$(cat)"
-  NONCE="$(cat "$DIR/marknonce" 2>/dev/null)"
-  __floo_osc() { printf '\033]1337;floo;%s;%s\007' "$NONCE" "$1" >> "$log"; }
-  # the cmd marker must carry the ACTUAL command. Two operator styles:
-  #   - `floo-powder exec` / `ssh host 'bash -s'`: SSH_ORIGINAL_COMMAND is the literal `bash -s` shuttle
-  #     and the real commands are the piped SCRIPT  -> label = $in.
-  #   - direct `ssh host '<command>'` (e.g. the stack-update flow): the command IS SSH_ORIGINAL_COMMAND,
-  #     and $in (if any) is just its stdin data    -> label = SSH_ORIGINAL_COMMAND.
-  case "$SSH_ORIGINAL_COMMAND" in
-    bash\ -s|bash\ -s\ *) __floo_label="$in" ;;
-    *)                    __floo_label="$SSH_ORIGINAL_COMMAND" ;;
-  esac
-  __floo_osc "cmd;$(printf '%s' "$__floo_label" | base64 | tr -d '\n')"
-  __floo_osc "out"
-  printf '%s' "$in" | { bash -c "$SSH_ORIGINAL_COMMAND"; } 2>&1 | tee -a "$log"
-  rc="${PIPESTATUS[1]}"
+  # the cmd marker must carry the ACTUAL command. Two operator styles, classified EXACTLY:
+  #   - the `floo-powder exec` shuttle: SSH_ORIGINAL_COMMAND is the EXACT literal `bash -s` and the real
+  #     commands are the piped SCRIPT -> label = the script (slurp stdin to get it).
+  #   - any direct `ssh host '<command>'` (the stack-update / agent flow, INCLUDING `bash -s <args>`):
+  #     the command IS SSH_ORIGINAL_COMMAND -> label = it, and stdin (if any) is just its data, so we
+  #     STREAM it to the child rather than slurp (slurping strips trailing newlines and would buffer a
+  #     whole multi-GB transfer in memory). The old `bash\ -s\ *` wildcard misclassified `bash -s <args>`
+  #     as the shuttle, giving it an empty label -> a blank `$` (the bug this fix exists to kill).
+  if [ "$SSH_ORIGINAL_COMMAND" = 'bash -s' ]; then
+    in="$(cat)"
+    __floo_mark_cmd "${in:-bash -s}"; __floo_osc "out"
+    printf '%s' "$in" | { bash -c "$SSH_ORIGINAL_COMMAND"; } 2>&1 | tee -a "$log"
+    rc="${PIPESTATUS[1]}"
+  else
+    __floo_mark_cmd "$SSH_ORIGINAL_COMMAND"; __floo_osc "out"
+    { bash -c "$SSH_ORIGINAL_COMMAND"; } 2>&1 | tee -a "$log"
+    rc="${PIPESTATUS[0]}"
+  fi
   __floo_osc "end;$rc"
   exit "$rc"
 fi
@@ -390,27 +403,34 @@ register_and_tunnel() {
   kill -0 "$TUNNEL_PID" 2>/dev/null || { warn "the outbound tunnel did not stay up"; return 1; }
 }
 
-# ─── Live status (the client's own window): connection + recording activity. ──────────────
+# ─── Live status: shared connect/idle detection (used by the python console AND no-python monitor). ──
+# Reap dead active-markers under $1/active, echo the current sessions.log line count, and return 0 if a
+# session is live RIGHT NOW (a live PID marker, OR a new sessions.log line since $2) else 1. The recorder
+# writes BOTH signals ONLY after a cert login (so a liveness probe never trips them): a durable per-session
+# line in sessions.log (catches even a sub-second command) + a live PID marker under active/.
+_session_active() {
+  local dir="$1" seen="$2" m p live now
+  for m in "$dir"/active/*; do
+    [ -e "$m" ] || continue; p="$(basename "$m")"; kill -0 "$p" 2>/dev/null || rm -f "$m"
+  done
+  live="$(ls "$dir/active" 2>/dev/null | wc -l)"
+  now="$( [ -f "$dir/sessions.log" ] && wc -l < "$dir/sessions.log" || echo 0 )"
+  echo "${now:-0}"
+  [ "${now:-0}" -gt "${seen:-0}" ] || [ "${live:-0}" -gt 0 ]
+}
+
+# ─── The client's own window when python3 is ABSENT: plain connect/idle lines (no pinned frame). ──
 monitor() {
-  printf '%s\n' "$$" > "$WORKDIR/watch.pid"; mkdir -p "$WORKDIR/active"
-  # Two signals, both written by the recorder ONLY after a cert login (so probes never trigger
-  # either): a per-session "started" line in sessions.log (durable — catches even a sub-second
-  # command), and a live PID marker (for "is one running right now", driving the finish debounce).
-  local shown=0 idle=0 seen live m p now
+  mkdir -p "$WORKDIR/active"
+  local shown=0 idle=0 seen now active
   seen="$( [ -f "$WORKDIR/sessions.log" ] && wc -l < "$WORKDIR/sessions.log" || echo 0 )"
   while kill -0 "$SSHD_PID" 2>/dev/null && kill -0 "$TUNNEL_PID" 2>/dev/null; do
-    for m in "$WORKDIR"/active/*; do
-      [ -e "$m" ] || continue; p="$(basename "$m")"; kill -0 "$p" 2>/dev/null || rm -f "$m"
-    done
-    live="$(ls "$WORKDIR/active" 2>/dev/null | wc -l)"
-    now="$( [ -f "$WORKDIR/sessions.log" ] && wc -l < "$WORKDIR/sessions.log" || echo 0 )"
-    if [ "${now:-0}" -gt "${seen:-0}" ] || [ "${live:-0}" -gt 0 ]; then
+    now="$(_session_active "$WORKDIR" "$seen")"; active=$?
+    if [ "$active" = 0 ]; then
       seen="$now"; idle=0
-      [ "$shown" = 0 ] && { printf '%s● a technician is connected%s\n' "$G" "$X"; shown=1; CONNECT_LOGGED=1; }
+      [ "$shown" = 0 ] && { printf '%s● a technician is connected%s\n' "$G" "$X"; shown=1; }
     elif [ "$shown" = 1 ]; then
-      # the operator stepped away (a bot operator runs many brief connections with gaps). Don't say
-      # "finished" — that nudges the client to close mid-operation. Only after a long idle, and only
-      # ever as "session still open". (Mirrors render_console's idle line; 30s avoids flapping.)
+      # stepped away — never say "finished" (it nudges the client to close mid-operation); 30s avoids flap.
       idle=$((idle + 1))
       [ "$idle" -ge 30 ] && { printf '%s○ support session open · technician stepped away (still recording) — Ctrl-C only when you are done%s\n' "$D" "$X"; shown=0; idle=0; }
     fi
@@ -467,22 +487,12 @@ _con_line() {
 }
 
 render_console() {
-  local read_only="${1:-0}" dir rpid start="" shown=0 idle=0 seen live now m p
-  dir="$WORKDIR"
-  if [ "$read_only" = 1 ]; then
-    dir="$(session_dir "$NAME")"
-    [ -d "$dir" ] || { warn "no support session is open right now."; exit 1; }
-  else
-    printf '%s\n' "$$" > "$dir/watch.pid"; mkdir -p "$dir/active"
-  fi
-  command -v python3 >/dev/null 2>&1 || {
-    if [ "$read_only" = 1 ]; then tail -n +1 -F "$dir/recording/session.raw" 2>/dev/null; else monitor; fi
-    return
-  }
-  local last_status="" nonce; nonce="$(cat "$dir/marknonce" 2>/dev/null)"
+  local dir="$WORKDIR" rpid start="" shown=0 idle=0 seen now active last_status="" nonce
+  mkdir -p "$dir/active"
+  command -v python3 >/dev/null 2>&1 || { monitor; return; }   # no python: plain status lines, no frame
+  nonce="$(cat "$dir/marknonce" 2>/dev/null)"
   trap '_con_setup; [ -n "${last_status:-}" ] && _con_status "$last_status"' WINCH
-  # reap THIS pane's pipeline (its own subshell children — NOT a system-wide pattern, which would
-  # also kill another pane watching the same session), then restore the terminal
+  # reap THIS pane's pipeline (its own subshell children — NOT a system-wide pattern), restore the terminal
   trap 'pkill -P "$rpid" 2>/dev/null; kill "$rpid" 2>/dev/null; _con_teardown; exit 0' INT TERM HUP
   printf '\033[?25l'; _con_setup
   # tail a FIXED name (`tail -F` retries it until the recorder creates it on the first connect).
@@ -491,18 +501,12 @@ render_console() {
   seen="$( [ -f "$dir/sessions.log" ] && wc -l < "$dir/sessions.log" || echo 0 )"
   last_status="$(_con_line waiting)"; _con_status "$last_status"
   while kill -0 "$rpid" 2>/dev/null; do
-    for m in "$dir"/active/*; do
-      [ -e "$m" ] || continue; p="$(basename "$m")"; kill -0 "$p" 2>/dev/null || rm -f "$m"
-    done
-    live="$(ls "$dir/active" 2>/dev/null | wc -l)"
-    now="$( [ -f "$dir/sessions.log" ] && wc -l < "$dir/sessions.log" || echo 0 )"
-    if [ "${now:-0}" -gt "${seen:-0}" ] || [ "${live:-0}" -gt 0 ]; then
-      seen="$now"; idle=0; [ -z "$start" ] && start="$SECONDS"; shown=1; CONNECT_LOGGED=1
+    now="$(_session_active "$dir" "$seen")"; active=$?
+    if [ "$active" = 0 ]; then
+      seen="$now"; idle=0; [ -z "$start" ] && start="$SECONDS"; shown=1
       last_status="$(_con_line connected "$(_fmt_elapsed $((SECONDS-start)))")"; _con_status "$last_status"
     elif [ "$shown" = 1 ]; then
-      # the operator stepped away (a bot operator runs many brief `exec` connections with gaps). Don't
-      # cry "finished" — that nudges the client to close mid-operation. Only after a long idle, and
-      # only ever as "session still open / still recording". 30s avoids flapping between quick execs.
+      # stepped away (a bot runs many brief execs with gaps) — never "finished"; 30s avoids flapping.
       idle=$((idle + 1))
       [ "$idle" -ge 30 ] && { last_status="$(_con_line idle "$(_fmt_elapsed $((SECONDS-start)))")"; _con_status "$last_status"; shown=0; idle=0; }
     fi
@@ -512,30 +516,13 @@ render_console() {
   _con_teardown
 }
 
-# ─── Read-only watch attach (second window: `floo --watch`). ───────────────────────
-watch_attach() {
-  local dir; dir="$(session_dir "$NAME")"
-  [ -d "$dir" ] || { warn "no support session is open right now."; exit 1; }
-  ok "attached read-only to the $NAME support session — what the technician runs scrolls below."
-  say "${D}(Ctrl-C just closes this view; it does NOT end the session.)${X}"
-  render_console 1
-}
-
-status_only() {
-  local dir; dir="$(session_dir "$NAME")"
-  if [ -d "$dir" ] && [ -f "$dir/watch.pid" ] && kill -0 "$(cat "$dir/watch.pid" 2>/dev/null)" 2>/dev/null; then
-    ok "a support session for '$NAME' is OPEN (pid $(cat "$dir/watch.pid"))."; exit 0
-  fi
-  info "no support session for '$NAME' is open."; exit 1
-}
-
 # ─── Live renderer: raw recording stream (stdin) → clean command-log lines (stdout). ─────────
 # Written to a file because it must read the operator stream on stdin.
 RENDER_PY=""
 write_render_py() {
   [ -n "$RENDER_PY" ] && return 0
   # inside a live session, place it in WORKDIR so teardown's `rm -rf "$WORKDIR"` reaps it; the
-  # standalone modes (--render/--watch/--clean-dir) fall back to a temp file they self-clean.
+  # standalone modes (--render/--clean-dir) fall back to a temp file they self-clean.
   if [ -n "${WORKDIR:-}" ] && [ -d "$WORKDIR" ]; then RENDER_PY="$WORKDIR/render.py"
   else RENDER_PY="$(mktemp "${TMPDIR:-/tmp}/floo-render.XXXXXX")" || return 1; fi
   cat > "$RENDER_PY" <<'PY'
@@ -556,8 +543,12 @@ cur = []
 col = 0
 # SUP: in a hooked session, suppress the inter-command region (the shell prompt + the echo of the
 # typed command) in the RENDERED view — the command is already shown cleanly via its `$ <cmd>` marker
-# and its output between out/end. Starts off, so pre-first-marker content and marker-less (non-hooked)
-# sessions render fully; turns on after each `end`, off on each `cmd`. The raw `.raw` keeps every byte.
+# and its output between out/end. Starts off (pre-first-marker + marker-less non-hooked sessions render
+# fully). ONLY a `prompt` marker turns it on, and it SELF-LIMITS at the next newline (the prompt+echo is
+# a single line). Crucially `end` does NOT latch it: every operator connection appends to the one shared
+# session.raw that this single renderer concatenates, so a latched flag would let one connection's
+# end/prompt swallow ANOTHER connection's real output (and the file-transfer disclosure). Self-limiting
+# + prompt-only bounds any cross-connection bleed to at most one line; the raw `.raw` keeps every byte.
 SUP = {"on": False}
 decoder = codecs.getincrementaldecoder('utf-8')('replace')
 def emit(line):
@@ -615,7 +606,9 @@ def handle_marker(kind, arg):
         try: code = int(arg or "0")
         except ValueError: code = 0
         if code != 0: emit("  ↳ exit %d" % code)
-        SUP["on"] = True
+        # NB: `end` deliberately does NOT set SUP — only `prompt` (the interactive precmd) does. An exec
+        # connection emits cmd/out/end with no prompt, so after it SUP stays off and the NEXT connection's
+        # output renders instead of being suppressed.
 def feed(text):
     global col
     i = 0; n = len(text)
@@ -667,7 +660,9 @@ def feed(text):
                         handle_marker(m.group(1), m.group(2))
                 i = end; continue
             i += 2; continue                                       # other ESC x -> drop
-        if SUP["on"]: i += 1; continue                             # inter-command prompt/echo — suppressed
+        if SUP["on"]:                                              # inter-command prompt/echo — suppressed
+            if ch == '\n': SUP["on"] = False                       # self-limit: the prompt+echo is ONE line
+            i += 1; continue
         if ch == '\r': col = 0; i += 1; continue
         if ch == '\n': flush_line(); i += 1; continue
         if ch == '\b': col = max(0, col-1); i += 1; continue
@@ -838,7 +833,7 @@ teardown() {
     fi
   fi
 
-  if [ "$CONNECT_LOGGED" = 1 ] || ls "$WORKDIR"/recording/*.raw >/dev/null 2>&1; then
+  if ls "$WORKDIR"/recording/*.raw >/dev/null 2>&1; then
     local keep="$HOME/.floo-last-session"; mkdir -p "$keep/recording" 2>/dev/null
     cp "$WORKDIR"/recording/*.raw "$keep/recording/" 2>/dev/null   # the raw, complete record
     clean_recordings "$keep/recording"                             # renders the readable .log
@@ -914,8 +909,6 @@ Usage:
   floo --relay H[:P] --operator-ca KEY [--relay-hostkey KEY] [--name N]
                             open a session with the operator passed inline (ad-hoc)
   floo --operator NAME      pick which saved operator to use
-  floo --watch              attach a read-only live view to a session already running
-  floo --status             print whether a session is currently open, then exit
   floo install              copy floo into ~/.local/bin (so you needn't curl it each time)
   floo config import [F]    save an operator config blob (file or stdin)
   floo config add NAME --relay H[:P] --operator-ca KEY [--relay-hostkey KEY]
@@ -1015,10 +1008,8 @@ main() {
     --pin) FLOO_RELAY_PIN="$2"; shift 2;;
     --name) FLOO_NAME="$2"; shift 2;;
     --public) FLOO_PUBLIC=1; shift;;
-    --watch) mode=watch; shift;;
     --render) mode=render; shift;;
     --console-frame) mode=conframe; shift;;
-    --status) mode=status; shift;;
     --print-name) mode=printname; shift;;
     --show-operator) mode=showop; shift;;
     *) warn "unknown option: $1"; usage; exit 1;;
@@ -1033,10 +1024,8 @@ main() {
   FLOO_RELAY_HOSTKEY="$(printf '%s' "$FLOO_RELAY_HOSTKEY" | tr '\n\r\t' '   ' | tr -s ' ' | sed 's/^ *//;s/ *$//')"
   [ "$mode" = showop ] && { printf 'relay=%s:%s\n' "$FLOO_RELAY_HOST" "$FLOO_RELAY_PORT"; exit 0; }
   case "$mode" in
-    watch) watch_attach;;
     render) render_stream;;
     conframe) CON_ROWS="$(_con_rows)"; _con_setup; _con_status "$(_con_line waiting)"; _con_teardown;;
-    status) status_only;;
     session)
       [ -n "$NAME" ] || { warn "could not determine this box's name; set FLOO_NAME=…"; exit 1; }
       if [ "$FLOO_PUBLIC" = 1 ]; then
@@ -1049,4 +1038,6 @@ main() {
   esac
 }
 
-main "$@"
+# FLOO_NO_MAIN=1 lets tests `source` this file to call functions in isolation (e.g. the no-python
+# monitor fallback) without running a session. No effect on normal invocation.
+[ "${FLOO_NO_MAIN:-}" = 1 ] || main "$@"

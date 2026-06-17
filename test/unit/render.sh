@@ -169,6 +169,25 @@ sleep 1.5; kill "$LPID" 2>/dev/null; wait "$LPID" 2>/dev/null
 grep -q 'h ~ ' "$LD/live.out" && bad "live pane leaked the raw prompt/echo (dedup failed)" || ok "live pane suppressed the prompt/echo (no 3x)"
 rm -rf "$LD"
 
+echo "=== LIVE console: concurrent connections + transfer disclosure can't be swallowed (suppression bugs) ==="
+# Every operator connection appends to the ONE shared session.raw; the renderer concatenates them.
+# A connection's `end` marker must NOT latch suppression and eat a CONCURRENT connection's output.
+stream="$(m "cmd;$(b64 'A: systemctl status')")$(m out)A-OUTPUT\n$(m 'end;0')B-CONCURRENT-OUTPUT\nB-line2\n"
+out="$(render "$stream")"
+{ grep -qx 'A-OUTPUT' <<<"$out" && grep -qx 'B-CONCURRENT-OUTPUT' <<<"$out" && grep -qx 'B-line2' <<<"$out"; } \
+  && ok "output after another connection's 'end' marker is NOT suppressed" || bad "concurrent output suppressed after end: [$out]"
+# A `prompt` marker suppresses only the single prompt+echo LINE, then self-limits — a concurrent
+# connection's output on the NEXT line must render (a latched flag would eat it).
+stream="$(m prompt)PROMPT-AND-ECHO-LINE\nCONCURRENT-B-OUTPUT\n"
+out="$(render "$stream")"
+{ ! grep -q 'PROMPT-AND-ECHO-LINE' <<<"$out" && grep -qx 'CONCURRENT-B-OUTPUT' <<<"$out"; } \
+  && ok "prompt suppression self-limits to one line (next-line output renders)" || bad "prompt over-suppressed: [$out]"
+# The file-transfer disclosure is emitted by the recorder as a nonce `cmd` marker, so even right after
+# a `prompt` (which suppresses) the `cmd` resets suppression and the disclosure is shown to the client.
+stream="$(m "cmd;$(b64 'ls')")$(m out)$(m 'end;0')$(m prompt)$(m "cmd;$(b64 'file transfer (binary — recorded as the command only): scp -t /home/u/secret')")$(m out)$(m 'end;0')"
+out="$(render "$stream")"
+grep -q 'file transfer.*scp -t /home/u/secret' <<<"$out" && ok "file-transfer disclosure renders after a prior command" || bad "transfer disclosure suppressed: [$out]"
+
 echo "=== no temp-file leak from --render ==="
 before=$(ls "${TMPDIR:-/tmp}"/floo-render.* 2>/dev/null | wc -l)
 for i in 1 2 3; do printf 'x\n' | FLOO_MARK_NONCE="$N" "$FLOO" --render >/dev/null 2>&1; done
