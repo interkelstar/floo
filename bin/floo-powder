@@ -107,7 +107,7 @@ cmd_connect() {
   quick="$(sed -n 's/^quick=//p' <<<"$meta")"
   { [ -n "$sid" ] && [ -n "$hostkey" ]; } || die "the relay returned an incomplete session record"
   loginuser="${loginuser:-$label}"
-  echo "${G}✓ code matches — connected to the genuine session${X}"
+  echo "${G}✓ code matches — this is the genuine session (resolved at the relay)${X}"
 
   # friendly handle: the client's label if it's free, else the sid (both unique on this operator box)
   local handle="$sid"
@@ -573,12 +573,23 @@ SSHD_BIN="$(command -v sshd || echo /usr/sbin/sshd)"
 open_port() {
   if   command -v firewall-cmd >/dev/null; then firewall-cmd --permanent --add-port="$1/tcp" >/dev/null 2>&1 && firewall-cmd --reload >/dev/null 2>&1
   elif command -v ufw          >/dev/null; then ufw allow "$1/tcp" >/dev/null 2>&1
-  elif command -v nft          >/dev/null; then nft add rule inet filter input tcp dport "$1" accept 2>/dev/null || true
+  elif command -v nft          >/dev/null; then
+    # raw nftables: the inet/filter/input chain may not exist on a minimal box — create it idempotently
+    # before adding the accept rule, else `nft add rule` errors and the `|| true` hides a no-op "open".
+    nft list chain inet filter input >/dev/null 2>&1 || { nft add table inet filter 2>/dev/null; nft add chain inet filter input '{ type filter hook input priority 0; policy accept; }' 2>/dev/null; }
+    nft add rule inet filter input tcp dport "$1" accept 2>/dev/null \
+      || echo "   ! could not add an nft rule for tcp/$1 — open it manually on this nft-only box"
   fi
 }
 close_port() {
   if   command -v firewall-cmd >/dev/null; then firewall-cmd --permanent --remove-port="$1/tcp" 2>/dev/null || true; firewall-cmd --reload >/dev/null 2>&1 || true
   elif command -v ufw          >/dev/null; then ufw delete allow "$1/tcp" >/dev/null 2>&1 || true
+  elif command -v nft          >/dev/null; then
+    # symmetric with open_port: find our accept rule by handle and delete it. If we can't, SAY so rather
+    # than let the uninstall banner imply the firewall opening is gone when it isn't (nft-only boxes).
+    local h; h="$(nft -a list chain inet filter input 2>/dev/null | awk -v p="$1" '$0 ~ "dport "p" " && /accept/ {for(i=1;i<=NF;i++) if($i=="handle") print $(i+1)}' | head -1)"
+    if [ -n "$h" ]; then nft delete rule inet filter input handle "$h" 2>/dev/null || echo "   ! could not delete the nft rule for tcp/$1 (handle $h) — remove it manually"
+    else echo "   ! no nft accept rule for tcp/$1 found to remove (it may need manual cleanup on this nft-only box)"; fi
   fi
 }
 ensure_gw_user() {
@@ -715,7 +726,18 @@ CFG
 # SELinux: under systemd the relay runs in the confined sshd_t domain, which may bind only the
 # ssh port (22). Our port (443 = http_port_t by default) is refused with EACCES until we label it
 # as an ssh port. Idempotent, and reverted by --uninstall, so a wiped box is left clean.
-if command -v semanage >/dev/null 2>&1 && [ "$(getenforce 2>/dev/null)" != Disabled ]; then
+SE="$(getenforce 2>/dev/null || echo Disabled)"
+if [ "$SE" = Enforcing ] && ! command -v semanage >/dev/null 2>&1; then
+  # SELinux is ENFORCING but the relabel tool is missing (policycoreutils-python-utils is NOT in a
+  # minimal RHEL/Fedora install). Without it tcp/$PORT stays http_port_t and the relay sshd is DENIED
+  # binding it — so turn the otherwise-cryptic systemd start failure below into an actionable message,
+  # and try to install the tool so the relabel block can run.
+  echo "==> SELinux is Enforcing but 'semanage' is missing — tcp/$PORT cannot be relabeled as ssh_port_t"
+  echo "    (the relay sshd would be DENIED binding $PORT). Installing policycoreutils-python-utils…"
+  pkg_install policycoreutils-python-utils 2>/dev/null || pkg_install policycoreutils-python3-utils 2>/dev/null \
+    || echo "   ! could not install it — run 'dnf install policycoreutils-python-utils', then re-run, or the relay will fail to bind $PORT"
+fi
+if command -v semanage >/dev/null 2>&1 && [ "$SE" != Disabled ]; then
   if ! semanage port -l 2>/dev/null | grep -qE "^ssh_port_t\b.*\b${PORT}\b"; then
     echo "==> SELinux: labeling tcp/$PORT as ssh_port_t"
     semanage port -a -t ssh_port_t -p tcp "$PORT" 2>/dev/null \

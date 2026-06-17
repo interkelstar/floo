@@ -23,7 +23,7 @@ _session_active "$d" 1 >/dev/null
 [ -e "$d/active/2147480000" ] && bad "dead active-marker not reaped" || ok "dead active-marker is reaped"
 rm -rf "$d"
 
-echo "=== monitor(): no-python fallback announces a connected technician for a live session ==="
+echo "=== monitor(): no-python fallback announces a connected helper for a live session ==="
 out="$(
   W="$(mktemp -d)"; mkdir -p "$W/active"
   WORKDIR="$W" G="" X="" D=""
@@ -34,7 +34,7 @@ out="$(
   kill "$SSHD_PID" "$TUNNEL_PID" 2>/dev/null; wait "$MPID" 2>/dev/null
   cat "$W/mon.out"; rm -rf "$W"
 )"
-grep -q 'a technician is connected' <<<"$out" && ok "monitor announces a connected technician" || bad "monitor silent: [$out]"
+grep -q 'your helper is connected' <<<"$out" && ok "monitor announces a connected helper" || bad "monitor silent: [$out]"
 
 echo "=== render_console falls through to monitor() when python3 is ABSENT (minimal/container boxes) ==="
 out="$(
@@ -48,7 +48,7 @@ out="$(
   kill "$SSHD_PID" "$TUNNEL_PID" 2>/dev/null; wait "$RPID" 2>/dev/null
   cat "$W/rc.out"; rm -rf "$W"
 )"
-grep -q 'a technician is connected' <<<"$out" && ok "render_console uses monitor (plain lines, no pinned frame) without python3" || bad "no-python render_console produced no status: [$out]"
+grep -q 'your helper is connected' <<<"$out" && ok "render_console uses monitor (plain lines, no pinned frame) without python3" || bad "no-python render_console produced no status: [$out]"
 
 echo; echo "=== $P passed, $F failed ==="
 [ "$F" -eq 0 ]

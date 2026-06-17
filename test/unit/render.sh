@@ -140,7 +140,7 @@ grep -q 'bash -s' <<<"$out" && bad "exec view showed the 'bash -s' shuttle" || o
 echo "=== console frame: scroll region setup/teardown ==="
 frame="$("$FLOO" --console-frame 2>/dev/null | cat -v)"
 grep -q '1;.*r' <<<"$frame" && ok "sets a DECSTBM scroll region" || bad "no scroll region: [$frame]"
-grep -q 'waiting for the technician' <<<"$frame" && ok "paints the waiting status" || bad "no status line: [$frame]"
+grep -q 'waiting for your helper' <<<"$frame" && ok "paints the waiting status" || bad "no status line: [$frame]"
 grep -qE '\^\[\[r' <<<"$frame" && ok "restores the full scroll region on teardown" || bad "no region reset: [$frame]"
 
 echo "=== saved recording: raw .raw preserved, readable .log rendered alongside ==="

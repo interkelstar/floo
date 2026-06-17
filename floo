@@ -341,9 +341,20 @@ PermitRootLogin no
 CFG
 }
 
+# Resolve the sshd binary — it lives in sbin and is usually NOT on a normal user's PATH, so probe the
+# common locations. The relay installer resolves it the same way; keep the two halves in agreement.
+resolve_sshd() {
+  local b; b="$(command -v sshd 2>/dev/null)"; [ -n "$b" ] && { printf '%s' "$b"; return; }
+  for b in /usr/sbin/sshd /usr/bin/sshd /sbin/sshd /usr/local/sbin/sshd; do
+    [ -x "$b" ] && { printf '%s' "$b"; return; }
+  done
+  printf '%s' /usr/sbin/sshd   # canonical fallback (the preflight reports if it's genuinely absent)
+}
+SSHD_BIN="$(resolve_sshd)"
+
 start_sshd() {
   # own process group (setsid) so teardown can kill the listener AND every connection it forks
-  setsid /usr/sbin/sshd -D -f "$WORKDIR/sshd_config" -E "$WORKDIR/sshd.log" &
+  setsid "$SSHD_BIN" -D -f "$WORKDIR/sshd_config" -E "$WORKDIR/sshd.log" &
   SSHD_PID=$!
   sleep 0.4
   kill -0 "$SSHD_PID" 2>/dev/null || { warn "could not start the local endpoint"; cat "$WORKDIR/sshd.log" 2>/dev/null; return 1; }
@@ -428,11 +439,11 @@ monitor() {
     now="$(_session_active "$WORKDIR" "$seen")"; active=$?
     if [ "$active" = 0 ]; then
       seen="$now"; idle=0
-      [ "$shown" = 0 ] && { printf '%s● a technician is connected%s\n' "$G" "$X"; shown=1; }
+      [ "$shown" = 0 ] && { printf '%s● your helper is connected · Ctrl-C ends the session%s\n' "$G" "$X"; shown=1; }
     elif [ "$shown" = 1 ]; then
       # stepped away — never say "finished" (it nudges the client to close mid-operation); 30s avoids flap.
       idle=$((idle + 1))
-      [ "$idle" -ge 30 ] && { printf '%s○ support session open · technician stepped away (still recording) — Ctrl-C only when you are done%s\n' "$D" "$X"; shown=0; idle=0; }
+      [ "$idle" -ge 30 ] && { printf '%s○ support session open · your helper stepped away (still recording) — Ctrl-C only when you are done%s\n' "$D" "$X"; shown=0; idle=0; }
     fi
     sleep 1
   done
@@ -453,7 +464,7 @@ bind_watcher() {
         if [ "$calc" = "$auth" ]; then
           printf '%s\n' "$opkey" > "$WORKDIR/authorized_keys.tmp"; chmod 600 "$WORKDIR/authorized_keys.tmp"
           mv "$WORKDIR/authorized_keys.tmp" "$WORKDIR/authorized_keys"   # atomic swap; live per-connection
-          ok "operator verified by the code — they can connect now."
+          ok "the person you gave the code to is verified — they can connect now."
           authorized=1; break
         fi
       done <<<"$got"
@@ -478,11 +489,15 @@ _con_setup() {
 _con_status() { printf '\033[s\033[%d;1H\033[2K%s\033[u' "$CON_ROWS" "$1"; }
 _con_teardown() { printf '\033[r\033[%d;1H\033[2K\033[?25h\n' "${CON_ROWS:-24}"; }
 _fmt_elapsed() { local s="$1"; printf '%dm%02ds' $((s/60)) $((s%60)); }
+# ONE client-facing word for the person on the other end — "your helper" — used everywhere a
+# non-technical user reads it (the warm term the README + --public prompt already use). "operator" is
+# reserved for the operator's own CLI (floo-powder) and code comments. Idle uses a HOLLOW glyph (○) in
+# both this frame and the no-python monitor() so "paused/away" reads consistently across environments.
 _con_line() {
   case "$1" in
-    waiting)   printf '%s◷ waiting for the technician to connect — Ctrl-C cancels%s' "$D" "$X";;
-    connected) printf '%s● technician connected · %s · Ctrl-C cuts the connection%s' "$G" "$2" "$X";;
-    idle)      printf '%s● support session open · %s · technician stepped away (still recording) — Ctrl-C only when you are done%s' "$D" "$2" "$X";;
+    waiting)   printf '%s◷ waiting for your helper to connect — Ctrl-C cancels%s' "$D" "$X";;
+    connected) printf '%s● your helper is connected · %s · Ctrl-C cuts the connection%s' "$G" "$2" "$X";;
+    idle)      printf '%s○ support session open · %s · your helper stepped away (still recording) — Ctrl-C only when you are done%s' "$D" "$2" "$X";;
   esac
 }
 
@@ -783,6 +798,23 @@ clean_recordings() {
   done
 }
 
+# Is the throwaway endpoint port still bound? Prefer `ss`; else a bash /dev/tcp connect probe (no extra
+# binary). Echoes "yes" (a listener is there), "no" (confirmed free), or "unknown" (couldn't check) — so
+# teardown never CLAIMS a revoke it cannot actually confirm (the one overclaim a support tool must avoid).
+port_bound() {
+  local p="$1"
+  [ -n "$p" ] || { echo unknown; return; }
+  if command -v ss >/dev/null 2>&1; then
+    ss -tlnH "( sport = :$p )" 2>/dev/null | grep -q . && echo yes || echo no
+    return
+  fi
+  # A successful /dev/tcp connect to 127.0.0.1:p PROVES a listener is still up. A failure is ambiguous
+  # (connection refused = free, but /dev/tcp may also be disabled in this bash), so we report "unknown"
+  # on failure rather than assert "free" — keeping the teardown message honest.
+  if (exec 3<>"/dev/tcp/127.0.0.1/$p") 2>/dev/null; then exec 3>&- 3<&-; echo yes; return; fi
+  echo unknown
+}
+
 # ─── Teardown: the revoke. Runs on Ctrl-C, on close, on any exit. ────────────────────────
 teardown() {
   trap - EXIT INT TERM HUP
@@ -805,17 +837,20 @@ teardown() {
   [ -f "$WORKDIR/clientkey" ] && relay_ssh deregister "$SID" >/dev/null 2>&1 && dereg_ok=1
 
   # THE REVOKE is the local endpoint being down — that, not the relay socket, is the access path.
-  # Confirm it, retrying a harder kill if needed; only then claim revoked.
-  if [ -n "$SSHD_PORT" ] && command -v ss >/dev/null 2>&1 && ss -tlnH "( sport = :$SSHD_PORT )" 2>/dev/null | grep -q .; then
+  # Confirm it (retrying a harder kill if it is somehow still bound); only claim "revoked" if CONFIRMED.
+  if [ "$(port_bound "$SSHD_PORT")" = yes ]; then
     warn "the local endpoint port $SSHD_PORT is still bound — killing harder"
     [ -f "$WORKDIR/sshd.pid" ] && kill -KILL "$(cat "$WORKDIR/sshd.pid" 2>/dev/null)" 2>/dev/null; sleep 0.3
   fi
-  if [ -n "$SSHD_PORT" ] && command -v ss >/dev/null 2>&1 && ss -tlnH "( sport = :$SSHD_PORT )" 2>/dev/null | grep -q .; then
-    warn "could NOT confirm the endpoint is down. If unsure, reboot — nothing survives a reboot."
-  else
-    ok "access revoked — the support endpoint is down; only a reboot-proof, no-listener state remains."
-    [ "$dereg_ok" = 1 ] && info "relay entry removed." || info "the relay entry points to a now-dead endpoint and will be auto-cleaned."
-  fi
+  case "$(port_bound "$SSHD_PORT")" in
+    yes) warn "could NOT confirm the endpoint is down. If unsure, reboot — nothing survives a reboot." ;;
+    no)
+      ok "access revoked — the support endpoint is down; only a reboot-proof, no-listener state remains."
+      [ "$dereg_ok" = 1 ] && info "relay entry removed." || info "the relay entry points to a now-dead endpoint and will be auto-cleaned." ;;
+    *)  # neither `ss` nor a /dev/tcp probe could check — be HONEST, never claim a revoke we can't confirm
+      ok "support endpoint shut down — its sshd + tunnel were killed. Could NOT independently confirm the port is closed on this box; a reboot makes it certain (nothing survives a reboot)."
+      [ "$dereg_ok" = 1 ] && info "relay entry removed." || info "the relay entry points to a now-dead endpoint and will be auto-cleaned." ;;
+  esac
 
   # the disclosure: did anything change?
   if [ -n "$BEFORE" ] && [ -f "$BEFORE" ]; then
@@ -823,7 +858,10 @@ teardown() {
     if diff -q "$BEFORE" "$AFTER" >/dev/null 2>&1; then
       ok "verified: your SSH keys, enabled services, and scheduled jobs are unchanged."
     else
-      warn "these access-related surfaces CHANGED during the session — review them:"
+      warn "something on this box's access surfaces CHANGED while your helper was connected:"
+      say  "${D}    (A '+' line is something ADDED. The one that matters most is a new '+' under${X}"
+      say  "${D}     '## authorized_keys' — that's a key that could let someone back in later. If you${X}"
+      say  "${D}     didn't expect a change, ask your helper what it was; the full record is saved below.)${X}"
       diff -u "$BEFORE" "$AFTER" 2>/dev/null | grep -E '^[+-]' | grep -vE '^(\+\+\+|---)' | sed 's/^/    /'
       # preserve the evidence (and the recording) outside tmpfs so it survives the wipe
       local keep="$HOME/.floo-last-session"; mkdir -p "$keep" 2>/dev/null
@@ -847,8 +885,11 @@ teardown() {
 }
 
 run_session() {
-  command -v ssh >/dev/null && command -v ssh-keygen >/dev/null && [ -x /usr/sbin/sshd ] || {
-    warn "this box is missing ssh/sshd — cannot open a support session."; exit 1; }
+  command -v ssh >/dev/null && command -v ssh-keygen >/dev/null && [ -x "$SSHD_BIN" ] || {
+    warn "this box has no SSH server installed, which floo needs to let your helper in. Ask whoever is"
+    warn "helping you, or install it: 'sudo apt install openssh-server' (Debian/Ubuntu) /"
+    warn "'sudo dnf install openssh-server' (Fedora/RHEL) / 'sudo pacman -S openssh' (Arch), then re-run."
+    exit 1; }
   [ "$(id -u)" = 0 ] && warn "you are running as root; support is designed to run as your own user."
 
   say ""
@@ -871,20 +912,20 @@ run_session() {
 
   say ""
   if [ "$FLOO_PUBLIC" = 1 ]; then
-    ok "your box is reachable in NO-CERT mode — the code below is the ONLY thing that grants access."
+    ok "your box is now reachable — and the code below is the ONLY thing that lets anyone in."
     say ""
     say "  ${B}Give this code ONLY to the person you want to help you:${X}   ${B}$PAIRCODE${X}"
     say "  ${D}Anyone who learns this code can connect. It's long on purpose. Don't post it anywhere;${X}"
     say "  ${D}read it to one person you trust. Close this window the moment you're done.${X}"
   else
-    ok "your box is now reachable by the operator — and ONLY by the operator's published key."
+    ok "your box is now reachable by the person helping you — and ONLY by their published key."
     say ""
     say "  ${B}Read this code back to whoever is helping you:${X}   ${B}$PAIRCODE${X}"
     say "  ${D}They must repeat it before connecting. If their copy doesn't match, do NOT proceed —${X}"
     say "  ${D}it means someone else is trying to answer. Just close this window.${X}"
   fi
   say ""
-  info "the technician's commands will appear below as they work. Ctrl-C ends the session."
+  info "your helper's commands will appear below as they work. Ctrl-C ends the session."
   say ""
 
   if [ "$FLOO_PUBLIC" = 1 ]; then bind_watcher & BINDWATCH_PID=$!; fi
