@@ -16,7 +16,7 @@
 | Network / relay-in-the-middle (DNS hijack of `relay.example.com`, on-path) | read/alter a session, or impersonate the relay to feed forged metadata | The operator's SSH terminates at the **client's** sshd; the relay only splices ciphertext (`nc -U` pivot) — it cannot read or inject. The client host key is pinned. **The relay's own host key is also pinned** — embedded in `floo` (`FLOO_RELAY_HOSTKEY`) and pinned operator-side at `ca-init` — so a hijacked relay presenting a different key is **rejected**, not trusted on first contact (closing the path where a MITM'd relay forges the pairing code + client host key). |
 | Malicious/abusive relay client | use the relay as a proxy or pivot | The `gw` account is confined by the sshd `Match` block to a **reverse unix-socket forward only** — `AllowTcpForwarding remote` + `PermitListen none` block `-L` and `-R`-TCP; no shell, no pty, no agent/X11/tunnel; the sole command is the dispatcher. |
 | A departed technician (the operator themselves) | retain standing access after a session | Access is the live foreground process; Ctrl-C/HUP/close tears down the endpoint + tunnel (process-group kill, no orphans) and deregisters. Nothing is enabled at boot. The before/after **state-diff** surfaces any keys/units/cron the operator added. |
-| Confused or anxious client | decide whether to revoke while help is happening | The default client window shows a live command log — stamped with a per-session secret nonce so the operator's command *output* cannot forge or hide a command — plus a pinned Ctrl-C status line. Disclosure, not containment (see residual #5), but it removes the old need for a second `--watch` terminal. |
+| Confused or anxious client | decide whether to revoke while help is happening | The default client window shows a live command log — stamped with a per-session secret nonce so the operator's command *output* cannot forge or hide a command — plus a pinned Ctrl-C status line, right in the same window they ran `floo` in. Disclosure, not containment (see residual #5). |
 
 ## What is explicitly NOT promised
 
@@ -44,9 +44,11 @@
    ephemeral keys). The cleartext code never reaches the relay — only its SHA-256 hash (and, in quick mode,
    `HMAC(code, opkey)`), both one-way over a ~65-bit code. A malicious relay **cannot transparently MITM**:
    to relay onward to the real client it would have to authenticate *as the operator*, and it can't — in CA
-   mode the cert signature is bound to the SSH session id (non-replayable onto a second connection), and in
-   quick mode the relay only ever holds the operator's *public* ephemeral key (and can't forge a valid
-   `HMAC(code, ·)` for its own key without the code). The genuine residual: the relay is the **only source
+   mode the operator proves possession of its ephemeral **private** key in the SSH key exchange, and the
+   relay (splicing only ciphertext) can neither extract that private key nor reuse the cert without it, so
+   it cannot complete a second publickey authentication to the real client; in quick mode the relay only
+   ever holds the operator's *public* ephemeral key (and can't forge a valid `HMAC(code, ·)` for its own
+   key without the code). The genuine residual: the relay is the **only source
    of the client's host key** (the operator pins whatever `resolve` returns — there's no out-of-band channel
    for it; only the *code* is read person-to-person). So a malicious relay can **impersonate the client** —
    redirect the operator's pivot to a relay-controlled sshd presenting a substituted host key — and capture
@@ -64,10 +66,14 @@
    where it matters) is fully tee-recorded and marked for the live command log. The one thing not byte-
    recorded is a **genuine binary file transfer** (`scp`/`rsync --server`/`sftp-server`): its bidirectional
    binary protocol can't be tee'd without deadlocking, so it is recorded as the command line only (the
-   *fact* of the transfer). That fast path is taken **only** for a pure transfer invocation — a command
-   that also chains or substitutes (`;` `&` `|` `` ` `` `$` `<` `>` newline) is NOT treated as a transfer
-   and is fully teed, so an operator cannot run arbitrary unrecorded commands behind a transfer-looking
-   prefix. **Interactive** shells run
+   *fact* of the transfer, disclosed to the live console through the nonce marker channel). That fast path
+   is taken **only** for a genuine transfer invocation — a command that also chains or substitutes (`;` `&`
+   `|` `` ` `` `$` `<` `>` newline), **or** that carries a command-executing option of the transfer binary
+   itself (`scp -S`/`-o`, `rsync --rsh`/`--rsync-path`/`-e <prog>`), is NOT treated as a transfer and is
+   fully teed — so an operator cannot run arbitrary unrecorded commands behind a transfer-looking prefix.
+   (The benign capability token a real `rsync --server` sends, `-e.iLsfxC`, is distinguished from a
+   program-bearing `-e` and still fast-paths.) Even for a genuine transfer the command **line** is recorded
+   in full; only the binary byte stream is not. **Interactive** shells run
    as a *native* login shell with the SSH markers stripped so they can never auto-attach the
    operator's/client's shared tmux (a shell rc doing `[[ -n $SSH_CONNECTION ]] && exec tmux` would
    otherwise hijack — and a teardown could kill — that session). Where util-linux `script` is present,

@@ -4,8 +4,8 @@
 
 The box never listens for inbound support. `floo` makes the box **dial out** to the relay, and
 that single foreground process **is** the access grant. Kill it → access is gone. Nothing is enabled at
-boot, so a reboot can't reopen it. Everything else (who may enter, recording, the client's watch view,
-the state-diff, and the live command log) layers on top of: **no live dial-out → no access.**
+boot, so a reboot can't reopen it. Everything else (who may enter, recording, the live command log,
+and the state-diff) layers on top of: **no live dial-out → no access.**
 
 ## Components & roles
 
@@ -13,7 +13,7 @@ the state-diff, and the live command log) layers on top of: **no live dial-out �
 |---|---|---|
 | `floo` | the **client** box, as the client's user | dial out, stand up a throwaway sshd gated by CA mode or quick mode, show the pairing code, render the live command log, record, tear down |
 | relay (`install-relay.sh` → dedicated sshd + `gw`) | the **operator** box | dumb switchboard: maps a random session id → a client's live reverse socket; splices ciphertext |
-| `floo-route` | relay, as `gw` (ForceCommand) | the only thing `gw` can do: register / meta / route / deregister / list |
+| `floo-route` | relay, as `gw` (ForceCommand) | the only thing `gw` can do: register / resolve / meta / route / deregister / list / bindop / getop / opconfig |
 | `floo-authkeys` | relay (AuthorizedKeysCommand) | accept any key (so no private key is published); the `Match` block makes `gw` powerless |
 | `bin/floo-powder` | the **operator** box | ca-init / list / connect by code (pin host key, mint cert or bind a quick-mode key) / exec / close / gc |
 
@@ -51,7 +51,7 @@ code+pin prove box→operator. Mutual.
 
 ## Wire contract (env-overridable; defaults in `()` )
 
-- relay endpoint: `FLOO_RELAY_HOST` (`relay.example.com`), `FLOO_RELAY_PORT` (`443`),
+- relay endpoint: `FLOO_RELAY_HOST` (no default — set via saved config / `--relay` / pin-bootstrap; e.g. `relay.example.com`), `FLOO_RELAY_PORT` (`443`),
   `FLOO_RELAY_USER` (`gw`), socket namespace `FLOO_RELAY_SOCK_DIR` (`/run/floo`),
   pinned relay host key `FLOO_RELAY_HOSTKEY` (embedded; env-overridable for tests).
 - relay socket: `<sockdir>/<sid>.sock` (the client's reverse unix-socket forward).
@@ -64,6 +64,7 @@ code+pin prove box→operator. Mutual.
   - `bindop <sid> <hmac> <operator-key...>` / `getop <sid>` for quick mode
   - `deregister <sid>` → remove socket + meta + quick binds (client teardown)
   - `list` → live/known sessions by label (dead ones GC'd)
+  - `opconfig` → serve the operator's **public** CA (so a pin-bootstrapped client fetches it over the host-key-verified relay instead of pasting it)
 - operator transport: `bin/floo-powder connect` writes `~/.ssh/floo.d/<name>.conf` with a
   `ProxyCommand ssh … gw@relay route <sid>`; then plain `ssh <name>` / `rsync … <name>:` work.
 

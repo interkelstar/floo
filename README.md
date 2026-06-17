@@ -48,8 +48,7 @@ floo                                                                 # any time 
 
 Read the pairing code back to whoever is helping you — they must repeat it before they can connect.
 While they're connected you see their commands and output scroll live in this same window, with a
-status line pinned at the bottom; **Ctrl-C** ends it. (`floo --watch` in a second terminal still
-gives the same read-only view if you prefer.)
+status line pinned at the bottom; **Ctrl-C** ends it.
 
 ### What you'll see
 
