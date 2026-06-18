@@ -1,4 +1,28 @@
 # Changelog
+## 0.7.0 — 2026-06-18
+
+Transparency + a true zero-install friend-to-friend flow.
+
+### Added
+- **Both tools announce their version on startup.** `floo` shows `floo vX.Y.Z` in the session banner;
+  `floo-powder` prints `floo-powder X.Y.Z` to **stderr** at the start of each human command (so it never
+  pollutes `exec` output or a parsed `list`; skipped for `--version`/`-h`/`--help` and the scripted
+  `exec` path).
+- **`floo-powder connect` is now zero-setup.** It auto-generates the ephemeral relay-auth key if absent
+  (the relay's `gw` account accepts any key — security rests on the code/CA, not on who holds a key), so
+  a helper can connect with **no `ca-init`**: `bash <(curl …/floo-powder) --relay H --pin FP connect CODE`
+  works on a fresh machine. `floo-powder` is also hardened to run safely via process substitution
+  (`bash <(…)`) under `set -e`.
+
+### Changed
+- **README opens with the friend-to-friend flow.** The very top now shows the two public-relay commands
+  (`floo.kelstar.me`) — one for the person who needs help, one for the helper — so nobody hunts for a
+  "Quick mode" section: copy, paste, read the code, connect. Zero installs on either side.
+
+### Notes
+- No protocol or security-model change; quick mode and CA mode are unaffected. New quick-loopback
+  assertion proves a fresh `FLOO_HOME` (no `ca-init`) auto-keys and authenticates.
+
 ## 0.6.0 — 2026-06-17
 
 A hardening + simplification pass driven by a fresh adversarial multi-agent review (correctness,

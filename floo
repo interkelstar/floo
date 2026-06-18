@@ -29,7 +29,7 @@
 set -uo pipefail
 umask 077   # everything we create (keys, config, recordings) is owner-only from birth
 
-FLOO_VERSION="0.6.0"
+FLOO_VERSION="0.7.0"
 
 # ─── The disclosure: the ONLY key that can enter. Public by design. ──────────────────────
 # This is a *public* key. Publishing it is safe and is the whole point: you read it and
@@ -893,7 +893,7 @@ run_session() {
   [ "$(id -u)" = 0 ] && warn "you are running as root; support is designed to run as your own user."
 
   say ""
-  say "${B}floo${X} — temporary, recorded help for ${B}$NAME${X}"
+  say "${B}floo${X} ${D}v$FLOO_VERSION${X} — temporary, recorded help for ${B}$NAME${X}"
   say "${D}Access lasts only while this window is open. Ctrl-C ends it. Nothing is installed.${X}"
   say ""
 

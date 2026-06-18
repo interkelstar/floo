@@ -96,6 +96,17 @@ else
   ok "operator connect with a wrong code fails to authorize"
 fi
 
+# ── ZERO-SETUP: a FRESH helper (empty FLOO_HOME, no ca-init) must auto-generate its relay-auth key and
+#    still reach the relay — the v0.7.0 friend-flow promise (`bash <(curl …/floo-powder) … connect`).
+#    Wrong code so it stops at resolve; assert the key got created AND gw auth worked (reached resolve). ──
+FRESHHOME="$WORK/fresh-op"
+env -i HOME="$OPHOME" PATH="$PATH" FLOO_HOME="$FRESHHOME" \
+    FLOO_RELAY_HOST=127.0.0.1 FLOO_RELAY_PORT="$PORT" FLOO_RELAY_USER="$ME" \
+    "$REPO/bin/floo-powder" connect --confirm WRON-GCOD-EXXX-X --no-shell >"$WORK/fresh.log" 2>&1 || true
+{ [ -f "$FRESHHOME/relay_id_ed25519" ] && grep -q 'no live session' "$WORK/fresh.log"; } \
+  && ok "zero-setup: a fresh FLOO_HOME auto-generates the relay key + authenticates (no ca-init)" \
+  || { bad "zero-setup connect did not auto-key/auth"; cat "$WORK/fresh.log"; }
+
 # ── ADVERSARIAL: a griefer who knows the SID (via 'list') binds a junk auth FIRST. The store-all design
 #    means the client must SKIP it (HMAC fails) and never authorize it — so the legit operator still gets in. ──
 JUNK_AUTH="$(printf '%064d' 0 | tr 0 a)"   # 64 hex, will never equal HMAC(realcode, junkkey)

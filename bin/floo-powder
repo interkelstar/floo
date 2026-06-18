@@ -19,7 +19,7 @@
 set -euo pipefail
 
 FLOO_HOME="${FLOO_HOME:-$HOME/.config/floo}"
-FLOO_VERSION="0.6.0"
+FLOO_VERSION="0.7.0"
 # FLOO_POWDER_SELF_MARKER — `install` greps for this token to tell an on-disk copy of this script
 # (symlink it) from being run piped via `curl … | bash` (no file to link → self-fetch the pinned tag).
 FLOO_POWDER_URL="${FLOO_POWDER_URL:-https://raw.githubusercontent.com/interkelstar/floo/v$FLOO_VERSION/bin/floo-powder}"
@@ -27,7 +27,10 @@ CA="$FLOO_HOME/ca/operator_ca"
 RELAY_KEY="$FLOO_HOME/relay_id_ed25519"      # operator's CLIENT key, to auth to the gw account
 RELAY_HOSTKEY="$FLOO_HOME/relay_hostkey"     # the relay's HOST key (pinned; deployed by install-relay.sh)
 SSH_DROPIN_DIR="$HOME/.ssh/floo.d"
-SELF="$(readlink -f "$0" 2>/dev/null || echo "$0")"; SD="$(cd "$(dirname "$SELF")" && pwd)"
+# `|| true` so a process-substitution / pipe `$0` (e.g. `bash <(curl …/floo-powder) … connect`) whose
+# dirname isn't cd-able doesn't abort us under `set -e` — SD is only used by init/relay-install, which
+# fall back to the embedded relay payload when it's empty; connect/exec never touch it.
+SELF="$(readlink -f "$0" 2>/dev/null || echo "$0")"; SD="$(cd "$(dirname "$SELF")" 2>/dev/null && pwd || true)"
 [ -f "$FLOO_HOME/relay.env" ] && . "$FLOO_HOME/relay.env"
 RELAY_HOST="${FLOO_RELAY_HOST:-${RELAY_HOST:-}}"        # set by relay.env (written by init) or FLOO_RELAY_HOST
 RELAY_PORT="${FLOO_RELAY_PORT:-${RELAY_PORT:-443}}"
@@ -52,6 +55,16 @@ relay_ssh() {
       -o BatchMode=yes -o ConnectTimeout=12 \
       -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile="$FLOO_HOME/relay_known_hosts" \
       "$RELAY_USER@$RELAY_HOST" "$@"
+}
+
+# The operator authenticates to the relay's POWERLESS `gw` account, which accepts ANY key (security
+# rests on gw being powerless + the code/CA, not on who holds a key). Generate an ephemeral relay-auth
+# key on the fly if absent, so a quick-mode helper can connect with ZERO prior setup — no `ca-init`:
+# `bash <(curl …/floo-powder) --relay H --pin FP connect CODE` just works.
+ensure_relay_key() {
+  [ -f "$RELAY_KEY" ] && return 0
+  mkdir -p "$FLOO_HOME"; chmod 700 "$FLOO_HOME"
+  ssh-keygen -t ed25519 -f "$RELAY_KEY" -N '' -q -C floo-powder-operator-relay && chmod 600 "$RELAY_KEY"
 }
 
 cmd_ca_init() {
@@ -95,6 +108,7 @@ cmd_connect() {
     read -r -p "Pairing code (blank to abort): " code
     [ -n "$code" ] || die "aborted."
   fi
+  ensure_relay_key   # zero-setup: a fresh helper needs no ca-init to reach the relay's gw account
   # resolve the code -> the session. This IS the verification: only the genuine client registered
   # that code, so a wrong code (or a squatter's different code) simply resolves to nothing.
   local meta; meta="$(relay_ssh resolve "$(codehash "${code^^}")")" \
@@ -803,6 +817,11 @@ while [ $# -gt 0 ]; do case "$1" in
   *) break;;
 esac; done
 [ -n "$FLOO_RELAY_PIN" ] && verify_relay_pin
+
+# transparency: announce the running version (to stderr, so it never pollutes stdout/`exec` output or a
+# parsed `list`). Skipped where it would be noise/duplication: --version/-h/--help print it already, and
+# `exec` is the scripted/bot path.
+case "${1:-}" in --version|-h|--help|""|exec) ;; *) printf '%sfloo-powder %s%s\n' "$D" "$FLOO_VERSION" "$X" >&2;; esac
 
 case "${1:-}" in
   install) shift; cmd_install "$@";;
