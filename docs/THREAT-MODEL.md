@@ -29,10 +29,13 @@
 
 ## Residual risks (accepted for v1, with rationale)
 
-1. **`curl|bash` integrity.** v1 pins to a commit hash over HTTPS. A swapped script could embed a
-   different CA key. Deferred hardening: a sha256 + signature published on a second channel, with a
-   download→verify→read→run bootstrap. The risk is *integrity*, not secrecy, and is bounded by HTTPS +
-   commit pinning today.
+1. **`curl|bash` integrity.** The published install one-liners pin a **release tag** (e.g. `v0.7.1`)
+   over HTTPS, and a repository ruleset makes `v*` tags **immutable** — it blocks force-move, update, and
+   deletion — so a published tag cannot be silently repointed to different code. For strict cryptographic
+   immutability you can instead pin a full **commit hash** (the operator one-liner honours
+   `FLOO_PIN_COMMIT`). A swapped script could still embed a different CA key, so the residual is
+   *integrity*, not secrecy — bounded by HTTPS + the immutable tag (or a pinned commit) today. Deferred
+   hardening: a sha256 + signature published on a second channel, with a download→verify→read→run bootstrap.
 2. **Relay `gw` is an internet-facing accept-any-key endpoint.** Anyone can authenticate as `gw` — but
    `gw` is powerless (reverse-unix-socket + dispatcher only), so the worst case is registering/holding a
    name socket (a squat, defeated by the pairing code) or resource use. Mitigations in place: charset
