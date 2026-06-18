@@ -50,5 +50,25 @@ out="$(
 )"
 grep -q 'your helper is connected' <<<"$out" && ok "render_console uses monitor (plain lines, no pinned frame) without python3" || bad "no-python render_console produced no status: [$out]"
 
+echo "=== floo --stop closes a session from ANOTHER terminal (lost-window recovery) ==="
+# no session open → says so, exits 0 (nothing to close)
+env -u XDG_RUNTIME_DIR HOME="$(mktemp -d)" FLOO_NAME=nope-$$ bash "$REPO/floo" --stop 2>&1 \
+  | grep -q 'no support session' && ok "floo --stop with no open session reports it (no-op)" || bad "stop without a session misbehaved"
+# ORPHANED session: the owning floo is gone but its sshd+tunnel linger. --stop must reap both + wipe the dir.
+res="$(
+  TH="$(mktemp -d)"
+  D="$TH/.local/state/floo/stopbox"; mkdir -p "$D/recording"
+  : > "$D/before.txt"; echo deadbeefdeadbeef > "$D/principals"      # principals = the sid (no clientkey → no relay call)
+  setsid sleep 120 & echo $! > "$D/sshd.pid"; SP=$!                 # stand in for the orphaned sshd (pid==pgid)
+  setsid sleep 120 & echo $! > "$D/tunnel.pid"; TP=$!               # stand in for the orphaned tunnel
+  env -u XDG_RUNTIME_DIR HOME="$TH" FLOO_NAME=stopbox bash "$REPO/floo" --stop >/dev/null 2>&1
+  kill -0 "$SP" 2>/dev/null && echo SSHD_ALIVE
+  kill -0 "$TP" 2>/dev/null && echo TUNNEL_ALIVE
+  [ -d "$D" ] && echo DIR_PRESENT
+  kill "$SP" "$TP" 2>/dev/null; rm -rf "$TH"
+)"
+{ ! grep -q ALIVE <<<"$res" && ! grep -q DIR_PRESENT <<<"$res"; } \
+  && ok "floo --stop reaps an orphaned session's endpoint + tunnel and wipes the dir" || bad "stop left something behind: [$res]"
+
 echo; echo "=== $P passed, $F failed ==="
 [ "$F" -eq 0 ]

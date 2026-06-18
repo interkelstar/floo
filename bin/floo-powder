@@ -19,7 +19,7 @@
 set -euo pipefail
 
 FLOO_HOME="${FLOO_HOME:-$HOME/.config/floo}"
-FLOO_VERSION="0.7.0"
+FLOO_VERSION="0.7.1"
 # FLOO_POWDER_SELF_MARKER — `install` greps for this token to tell an on-disk copy of this script
 # (symlink it) from being run piped via `curl … | bash` (no file to link → self-fetch the pinned tag).
 FLOO_POWDER_URL="${FLOO_POWDER_URL:-https://raw.githubusercontent.com/interkelstar/floo/v$FLOO_VERSION/bin/floo-powder}"

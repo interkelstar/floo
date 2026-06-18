@@ -29,7 +29,7 @@
 set -uo pipefail
 umask 077   # everything we create (keys, config, recordings) is owner-only from birth
 
-FLOO_VERSION="0.7.0"
+FLOO_VERSION="0.7.1"
 
 # ─── The disclosure: the ONLY key that can enter. Public by design. ──────────────────────
 # This is a *public* key. Publishing it is safe and is the whole point: you read it and
@@ -410,6 +410,7 @@ register_and_tunnel() {
       -R "$FLOO_RELAY_SOCK_DIR/$SID.sock:127.0.0.1:$SSHD_PORT" \
       "$FLOO_RELAY_USER@$FLOO_RELAY_HOST" &
   TUNNEL_PID=$!
+  printf '%s\n' "$TUNNEL_PID" > "$WORKDIR/tunnel.pid"   # so `floo --stop` can reap an orphaned tunnel
   sleep 1.2
   kill -0 "$TUNNEL_PID" 2>/dev/null || { warn "the outbound tunnel did not stay up"; return 1; }
 }
@@ -884,6 +885,34 @@ teardown() {
   ok "done. nothing is left running; a reboot would change nothing."
 }
 
+# ─── Close a session from ANOTHER terminal — the recovery path when the original window/connection ───
+# was lost (so there's no Ctrl-C to press). Normally a dropped SSH delivers SIGHUP and floo tears down
+# on its own; this handles the cases where it didn't (tmux/screen/nohup, or SIGKILL) and the endpoint
+# is still up. Reboot remains the guaranteed backstop — nothing here survives one.
+stop_session() {
+  local dir; dir="$(session_dir "$NAME")"
+  [ -d "$dir" ] || { info "no support session for '$NAME' is open — nothing to close."; exit 0; }
+  local mp; mp="$(cat "$dir/floo.pid" 2>/dev/null)"
+  if [ -n "$mp" ] && kill -0 "$mp" 2>/dev/null; then
+    # the floo that opened it is still running — signal it so IT runs the full teardown (revoke +
+    # port-down confirm + access-surface diff + recording), then wait for it to wipe the session dir.
+    info "closing the running support session for '$NAME'…"
+    kill -TERM "$mp" 2>/dev/null
+    local i; for i in $(seq 1 20); do [ -d "$dir" ] || break; sleep 0.3; done
+    [ -d "$dir" ] && { warn "it hasn't closed yet — give it a moment, or reboot (nothing survives a reboot)."; exit 1; }
+    ok "support session closed — access revoked."; exit 0
+  fi
+  # orphaned: the owning floo is gone but its sshd/tunnel may still be up. Reconstruct the handles from
+  # the session dir and run the SAME teardown (kills the endpoint + tunnel, confirms the port is down,
+  # shows the before/after access-surface diff, saves the recording, wipes the dir).
+  warn "the floo that opened this session is gone (orphaned) — tearing it down now…"
+  WORKDIR="$dir"; BEFORE="$dir/before.txt"
+  SID="$(cat "$dir/principals" 2>/dev/null)"
+  SSHD_PID="$(cat "$dir/sshd.pid" 2>/dev/null)"
+  TUNNEL_PID="$(cat "$dir/tunnel.pid" 2>/dev/null)"
+  teardown
+}
+
 run_session() {
   command -v ssh >/dev/null && command -v ssh-keygen >/dev/null && [ -x "$SSHD_BIN" ] || {
     warn "this box has no SSH server installed, which floo needs to let your helper in. Ask whoever is"
@@ -904,6 +933,7 @@ run_session() {
   rm -rf "$WORKDIR"; mkdir -p "$WORKDIR/recording" || { warn "cannot create session dir."; exit 1; }
   [ -L "$WORKDIR" ] && { warn "session dir became a symlink — refusing."; exit 1; }
   chmod 700 "$(dirname "$WORKDIR")" "$WORKDIR"
+  printf '%s\n' "$$" > "$WORKDIR/floo.pid"   # the main process to signal from `floo --stop` (another terminal)
   BEFORE="$WORKDIR/before.txt"; snapshot_surface "$BEFORE"
   build_endpoint
   start_sshd      || { teardown; exit 1; }
@@ -950,6 +980,7 @@ Usage:
   floo --relay H[:P] --operator-ca KEY [--relay-hostkey KEY] [--name N]
                             open a session with the operator passed inline (ad-hoc)
   floo --operator NAME      pick which saved operator to use
+  floo --stop               close a session from another terminal (if its window/connection was lost)
   floo install              copy floo into ~/.local/bin (so you needn't curl it each time)
   floo config import [F]    save an operator config blob (file or stdin)
   floo config add NAME --relay H[:P] --operator-ca KEY [--relay-hostkey KEY]
@@ -1049,6 +1080,7 @@ main() {
     --pin) FLOO_RELAY_PIN="$2"; shift 2;;
     --name) FLOO_NAME="$2"; shift 2;;
     --public) FLOO_PUBLIC=1; shift;;
+    --stop) mode=stop; shift;;
     --render) mode=render; shift;;
     --console-frame) mode=conframe; shift;;
     --print-name) mode=printname; shift;;
@@ -1065,6 +1097,7 @@ main() {
   FLOO_RELAY_HOSTKEY="$(printf '%s' "$FLOO_RELAY_HOSTKEY" | tr '\n\r\t' '   ' | tr -s ' ' | sed 's/^ *//;s/ *$//')"
   [ "$mode" = showop ] && { printf 'relay=%s:%s\n' "$FLOO_RELAY_HOST" "$FLOO_RELAY_PORT"; exit 0; }
   case "$mode" in
+    stop) stop_session;;
     render) render_stream;;
     conframe) CON_ROWS="$(_con_rows)"; _con_setup; _con_status "$(_con_line waiting)"; _con_teardown;;
     session)

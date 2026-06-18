@@ -1,4 +1,16 @@
 # Changelog
+## 0.7.1 — 2026-06-18
+
+### Added
+- **`floo --stop`** — close a session from **another terminal** when the original window/connection was
+  lost (so there's no Ctrl-C to press). It finds the session for this box and: if the floo that opened it
+  is still running, signals it to run the full teardown (revoke + port-down confirm + access-surface diff
+  + recording); if that floo is gone but its sshd/tunnel are orphaned, it reaps them itself and confirms
+  the endpoint is down. (A dropped SSH usually delivers SIGHUP and floo tears down on its own; this covers
+  the cases where it didn't — `tmux`/`screen`/`nohup`, or SIGKILL. `reboot` remains the guaranteed
+  backstop — nothing floo runs survives one.) The session now records its main + tunnel PIDs so `--stop`
+  can act precisely.
+
 ## 0.7.0 — 2026-06-18
 
 Transparency + a true zero-install friend-to-friend flow.

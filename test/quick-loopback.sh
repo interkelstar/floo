@@ -146,8 +146,15 @@ sleep 0.3
 # ── MANUAL-operator mode: a real INTERACTIVE shell over a pty must work AND be recorded ──
 # (the exec path above is non-interactive; this drives an actual login shell via ssh -tt — the
 #  record-session wrapper's interactive branch, distinct from the command branch.)
-{ sleep 2.5; printf 'echo IMARK_$((6*7))\n'; sleep 1.5; printf 'exit\n'; sleep 0.5; } \
-  | timeout 25 env HOME="$OPHOME" PATH="$PATH" ssh -tt -o BatchMode=yes qbox >"$WORK/interactive.log" 2>&1 || true
+# Wait for the hooked shell to be READY (a `prompt` marker reaches the recording) before typing, then
+# wait for the command's output to be recorded before sending `exit`. A fixed sleep here races zsh +
+# .zshrc startup under load (the loopback "client" borrows the real user's shell config) — poll instead.
+REC_RAW="$RUN/floo/qbox/recording/session.raw"
+{ for i in $(seq 1 80); do grep -aq ';prompt' "$REC_RAW" 2>/dev/null && break; sleep 0.25; done
+  printf 'echo IMARK_$((6*7))\n'
+  for i in $(seq 1 60); do grep -aq 'IMARK_42' "$REC_RAW" 2>/dev/null && break; sleep 0.25; done
+  printf 'exit\n'; sleep 0.5; } \
+  | timeout 45 env HOME="$OPHOME" PATH="$PATH" ssh -tt -o BatchMode=yes qbox >"$WORK/interactive.log" 2>&1 || true
 sleep 0.3
 grep -q 'IMARK_42' "$WORK/interactive.log" && ok "MANUAL-operator interactive shell ran (live output seen)" \
   || { bad "interactive shell produced no output"; cat "$WORK/interactive.log"; }
