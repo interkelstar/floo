@@ -29,6 +29,8 @@ you mean to let in, and close the window when you're done. The `--pin` is the re
 relay and use CA mode — see [For the operator](#for-the-operator). *(The helper line uses `bash`/`zsh`;
 on another shell: `curl … -o floo-powder && bash floo-powder … connect …`.)*
 
+![floo in action — a friend opens a session and reads back the code; the helper connects and their commands scroll live in the friend's window; Ctrl-C revokes access](demo.gif)
+
 ---
 
 A client types one command **only when they want help**. Their machine dials **out** to a relay you run
