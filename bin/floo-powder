@@ -35,6 +35,14 @@ SELF="$(readlink -f "$0" 2>/dev/null || echo "$0")"; SD="$(cd "$(dirname "$SELF"
 RELAY_HOST="${FLOO_RELAY_HOST:-${RELAY_HOST:-}}"        # set by relay.env (written by init) or FLOO_RELAY_HOST
 RELAY_PORT="${FLOO_RELAY_PORT:-${RELAY_PORT:-443}}"
 RELAY_USER="${FLOO_RELAY_USER:-${RELAY_USER:-gw}}"
+# SELF_RELAY_{HOST,PORT} is this box's OWN hosted relay identity, written once by `init` and never
+# touched afterward. Kept distinct from RELAY_HOST/PORT above, which is whichever relay floo-powder
+# is CURRENTLY pointed at for connect/exec — `--relay`/`verify_relay_pin` repoint that to someone
+# else's relay (e.g. a client's) without disturbing this box's own identity. `invite` must always
+# advertise SELF, never the transient one. Falls back to RELAY_HOST for relay.env files predating
+# this split (same box, same value, so the fallback is exact).
+SELF_RELAY_HOST="${SELF_RELAY_HOST:-${RELAY_HOST:-}}"
+SELF_RELAY_PORT="${SELF_RELAY_PORT:-${RELAY_PORT:-443}}"
 
 if [ -t 1 ]; then B=$'\e[1m'; D=$'\e[2m'; G=$'\e[32m'; Y=$'\e[33m'; R=$'\e[31m'; X=$'\e[0m'; else B="" D="" G="" Y="" R="" X=""; fi
 die() { printf '%serror:%s %s\n' "$R" "$X" "$*" >&2; exit 1; }
@@ -221,7 +229,7 @@ print_oneliner() {
   echo "curl -fsSL https://raw.githubusercontent.com/interkelstar/floo/$ref/floo | bash -s -- --relay $relayarg --pin $pin"
 }
 cmd_invite() {
-  local host="${FLOO_RELAY_PUBLIC_HOST:-$RELAY_HOST}" port="${FLOO_RELAY_PORT:-$RELAY_PORT}"
+  local host="${FLOO_RELAY_PUBLIC_HOST:-$SELF_RELAY_HOST}" port="${FLOO_RELAY_PORT:-$SELF_RELAY_PORT}"
   [ -n "$host" ] || die "unknown relay host — run 'floo-powder init' (or set FLOO_RELAY_PUBLIC_HOST)."
   echo "${B}── give this to the person you're helping (they run it, read you the code) ──${X}"
   print_oneliner "$host" "$port"
@@ -252,8 +260,10 @@ cmd_init() {
     echo "standing up the relay on this box (sudo)…"
     cmd_relay_install
   fi
-  # persist the public relay host so 'invite' and the operator CLI reuse it
-  { grep -vE '^RELAY_(HOST|PORT)=' "$FLOO_HOME/relay.env" 2>/dev/null; echo "RELAY_HOST=$host"; echo "RELAY_PORT=$port"; } > "$FLOO_HOME/relay.env.tmp" && mv "$FLOO_HOME/relay.env.tmp" "$FLOO_HOME/relay.env"
+  # persist the public relay host so 'invite' and the operator CLI reuse it — SELF_RELAY_* is the
+  # durable self-identity `invite` reads; RELAY_* is also set here as the current-relay default
+  # (see the SELF_RELAY split above) so a freshly-init'd box points at its own relay until repointed.
+  { grep -vE '^(RELAY_(HOST|PORT)|SELF_RELAY_(HOST|PORT))=' "$FLOO_HOME/relay.env" 2>/dev/null; echo "RELAY_HOST=$host"; echo "RELAY_PORT=$port"; echo "SELF_RELAY_HOST=$host"; echo "SELF_RELAY_PORT=$port"; } > "$FLOO_HOME/relay.env.tmp" && mv "$FLOO_HOME/relay.env.tmp" "$FLOO_HOME/relay.env"
   local ca hk; ca="$(cat "$CA.pub")"
   hk="$(cat /etc/floo/relay_hostkey.pub 2>/dev/null || cat "$RELAY_HOSTKEY.pub")"
   echo
@@ -300,7 +310,10 @@ verify_relay_pin() {
   mkdir -p "$FLOO_HOME"; chmod 700 "$FLOO_HOME"
   if [ "$RELAY_PORT" = 22 ]; then rt="$RELAY_HOST"; else rt="[$RELAY_HOST]:$RELAY_PORT"; fi
   printf '%s ssh-ed25519 %s\n' "$rt" "$blob" > "$FLOO_HOME/relay_known_hosts"
-  { echo "RELAY_HOST=$RELAY_HOST"; echo "RELAY_PORT=$RELAY_PORT"; } > "$FLOO_HOME/relay.env"
+  # Update only the current-relay keys — a full overwrite here would silently wipe this box's own
+  # SELF_RELAY_* identity (see the SELF_RELAY split above) whenever the operator points floo-powder
+  # at someone else's relay (e.g. a client's), breaking `invite` afterward.
+  { grep -vE '^RELAY_(HOST|PORT)=' "$FLOO_HOME/relay.env" 2>/dev/null; echo "RELAY_HOST=$RELAY_HOST"; echo "RELAY_PORT=$RELAY_PORT"; } > "$FLOO_HOME/relay.env.tmp" && mv "$FLOO_HOME/relay.env.tmp" "$FLOO_HOME/relay.env"
   echo "${G}✓ relay $RELAY_HOST pinned and saved${X}"
 }
 
