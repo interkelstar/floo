@@ -52,6 +52,7 @@ FLOO_RELAY_PIN="${FLOO_RELAY_PIN:-}"            # short relay-hostkey fingerprin
 FLOO_PUBLIC="${FLOO_PUBLIC:-0}"                 # --public: no-CA "quick" mode; the code IS the credential
 
 # ─── Cosmetic ────────────────────────────────────────────────────────────────────────────
+# shellcheck disable=SC2034  # full color palette declared; not every color is used everywhere
 if [ -t 1 ]; then B=$'\e[1m'; D=$'\e[2m'; G=$'\e[32m'; Y=$'\e[33m'; R=$'\e[31m'; X=$'\e[0m'
 else B=""; D=""; G=""; Y=""; R=""; X=""; fi
 say()  { printf '%s\n' "$*"; }
@@ -898,7 +899,7 @@ stop_session() {
     # port-down confirm + access-surface diff + recording), then wait for it to wipe the session dir.
     info "closing the running support session for '$NAME'…"
     kill -TERM "$mp" 2>/dev/null
-    local i; for i in $(seq 1 20); do [ -d "$dir" ] || break; sleep 0.3; done
+    local _; for _ in $(seq 1 20); do [ -d "$dir" ] || break; sleep 0.3; done
     [ -d "$dir" ] && { warn "it hasn't closed yet — give it a moment, or reboot (nothing survives a reboot)."; exit 1; }
     ok "support session closed — access revoked."; exit 0
   fi

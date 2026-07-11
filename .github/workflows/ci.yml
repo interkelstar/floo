@@ -1,0 +1,39 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+
+jobs:
+  lint:
+    name: shellcheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: shellcheck (warning level)
+        run: |
+          shellcheck --version
+          shellcheck -S warning \
+            floo bin/floo-powder \
+            relay/floo-route relay/floo-authkeys relay/install-relay.sh \
+            scripts/embed.sh \
+            test/run-all.sh test/loopback.sh test/quick-loopback.sh test/relay-debian.sh \
+            test/unit/*.sh
+
+  test:
+    name: full suite (unit + CA loopbacks + quick loopback)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: install test dependencies
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q openssh-server netcat-openbsd
+      - name: operator CA (tests expect one, mirroring a real operator box)
+        run: bin/floo-powder ca-init
+      - name: embedded relay in sync with relay/ (drift check)
+        run: scripts/embed.sh --check
+      - name: run all tests
+        run: bash test/run-all.sh

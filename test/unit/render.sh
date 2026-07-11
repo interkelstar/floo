@@ -190,7 +190,7 @@ grep -q 'file transfer.*scp -t /home/u/secret' <<<"$out" && ok "file-transfer di
 
 echo "=== no temp-file leak from --render ==="
 before=$(ls "${TMPDIR:-/tmp}"/floo-render.* 2>/dev/null | wc -l)
-for i in 1 2 3; do printf 'x\n' | FLOO_MARK_NONCE="$N" "$FLOO" --render >/dev/null 2>&1; done
+for _ in 1 2 3; do printf 'x\n' | FLOO_MARK_NONCE="$N" "$FLOO" --render >/dev/null 2>&1; done
 after=$(ls "${TMPDIR:-/tmp}"/floo-render.* 2>/dev/null | wc -l)
 [ "$after" -le "$before" ] && ok "--render leaves no temp renderer files behind" || bad "leaked $((after-before)) temp files"
 

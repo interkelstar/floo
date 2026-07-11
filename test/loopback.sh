@@ -101,16 +101,16 @@ PTYRUN_LOG="$WORK/client.log" PTYRUN_PIDFILE="$WORK/client.pid" \
     FLOO_OPERATOR_CA="$(cat "$CA_PUB")" \
     bash "$REPO/floo" &
 PTYRUN_PID=$!
-for i in $(seq 1 30); do [ -s "$WORK/client.pid" ] && break; sleep 0.1; done
+for _ in $(seq 1 30); do [ -s "$WORK/client.pid" ] && break; sleep 0.1; done
 CLIENT_PID="$(cat "$WORK/client.pid" 2>/dev/null)"
 
 # wait for the reverse socket + the registration meta to appear
-for i in $(seq 1 50); do ls "$SOCK"/*.sock >/dev/null 2>&1 && ls "$SOCK"/*.meta >/dev/null 2>&1 && break; sleep 0.2; done
+for _ in $(seq 1 50); do ls "$SOCK"/*.sock >/dev/null 2>&1 && ls "$SOCK"/*.meta >/dev/null 2>&1 && break; sleep 0.2; done
 SID="$(sed -n 's/^sid=//p' "$SOCK"/*.meta 2>/dev/null | head -1)"
 ls "$SOCK"/*.sock >/dev/null 2>&1 && ok "client dialed out: reverse socket present on the relay" || { bad "no reverse socket"; cat "$WORK/client.log"; }
 { [ -n "$SID" ] && grep -q '^label=testbot' "$SOCK/$SID.meta"; } && ok "client registered (sid ${SID:0:8}…, label testbot) + host key" || bad "no registration meta"
 
-CODE=""; for i in $(seq 1 50); do CODE="$(grep -oE '[0-9A-F]{4}-[0-9A-F]{4}' "$WORK/client.log" | head -1)"; [ -n "$CODE" ] && break; sleep 0.2; done
+CODE=""; for _ in $(seq 1 50); do CODE="$(grep -oE '[0-9A-F]{4}-[0-9A-F]{4}' "$WORK/client.log" | head -1)"; [ -n "$CODE" ] && break; sleep 0.2; done
 [ -n "$CODE" ] && ok "client displayed a pairing code ($CODE)" || bad "client showed no pairing code"
 
 # ── 3. squatter / wrong-code is refused ──────────────────────────────────────────────────
@@ -173,11 +173,11 @@ fi
 
 note "delivering a real Ctrl-C (\\x03) to the client's terminal…"
 kill -TERM "$PTYRUN_PID" 2>/dev/null   # ptyrun forwards \x03 to the pty = a genuine Ctrl-C
-for i in $(seq 1 50); do kill -0 "$CLIENT_PID" 2>/dev/null || break; sleep 0.2; done
+for _ in $(seq 1 50); do kill -0 "$CLIENT_PID" 2>/dev/null || break; sleep 0.2; done
 kill -0 "$CLIENT_PID" 2>/dev/null && { bad "client did not exit after Ctrl-C"; kill -KILL "$CLIENT_PID" 2>/dev/null; } || ok "client exited on Ctrl-C and ran teardown"
 CLIENT_PID=""
 
-for i in $(seq 1 15); do [ -S "$SOCK/testbot.sock" ] || break; sleep 0.2; done   # async unlink
+for _ in $(seq 1 15); do [ -S "$SOCK/testbot.sock" ] || break; sleep 0.2; done   # async unlink
 [ -S "$SOCK/testbot.sock" ] && bad "relay socket STILL present after revoke" || ok "relay socket released (close = revoke)"
 # no orphaned throwaway sshd / tunnel left behind
 if pgrep -af "floo/testbot" 2>/dev/null | grep -q sshd; then bad "orphaned throwaway sshd survived teardown"; else ok "no orphaned sshd/tunnel after teardown"; fi

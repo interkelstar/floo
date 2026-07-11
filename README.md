@@ -1,5 +1,8 @@
 # floo
 
+[![CI](https://github.com/interkelstar/floo/actions/workflows/ci.yml/badge.svg)](https://github.com/interkelstar/floo/actions/workflows/ci.yml)
+[![shellcheck](https://img.shields.io/badge/shellcheck-clean-brightgreen)](https://github.com/interkelstar/floo/actions/workflows/ci.yml)
+
 **Temporary, recorded, instantly-revocable remote console access** — TeamViewer's convenience with a
 bastion's security posture, for the terminal. You hand it to someone whose box you *don't* own.
 
@@ -210,6 +213,7 @@ recording (`session.raw`) is saved as the tamper-evident record, with a readable
 + the before/after state-diff. Ctrl-C/close = full teardown.
 
 Design & threat model: [`docs/DESIGN.md`](docs/DESIGN.md), [`docs/THREAT-MODEL.md`](docs/THREAT-MODEL.md).
+Want to audit the code yourself? [`docs/READING.md`](docs/READING.md) maps both scripts section-by-section — ~20 minutes.
 Tests: `bash test/run-all.sh` (unit + a full single-host loopback proving cert-only entry, the
 pairing-code gate, real Ctrl-C revoke, and the state-diff).
 

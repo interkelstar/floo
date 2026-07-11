@@ -76,15 +76,15 @@ PTYRUN_LOG="$WORK/client.log" PTYRUN_PIDFILE="$WORK/client.pid" \
     FLOO_RELAY_HOSTKEY="$(cat "$RELAY/hostkey.pub")" \
     bash "$REPO/floo" --public &
 PTYRUN_PID=$!
-for i in $(seq 1 30); do [ -s "$WORK/client.pid" ] && break; sleep 0.1; done
+for _ in $(seq 1 30); do [ -s "$WORK/client.pid" ] && break; sleep 0.1; done
 CLIENT_PID="$(cat "$WORK/client.pid" 2>/dev/null)"
 
-for i in $(seq 1 50); do ls "$SOCK"/*.sock >/dev/null 2>&1 && ls "$SOCK"/*.meta >/dev/null 2>&1 && break; sleep 0.2; done
+for _ in $(seq 1 50); do ls "$SOCK"/*.sock >/dev/null 2>&1 && ls "$SOCK"/*.meta >/dev/null 2>&1 && break; sleep 0.2; done
 SID="$(sed -n 's/^sid=//p' "$SOCK"/*.meta 2>/dev/null | head -1)"
 { [ -n "$SID" ] && grep -q '^quick=1' "$SOCK/$SID.meta"; } && ok "client registered a quick session (sid ${SID:0:8}…)" || { bad "no quick registration"; cat "$WORK/client.log"; }
 
 # the displayed code (base32, grouped) — long, uppercase, with dashes
-CODE=""; for i in $(seq 1 50); do CODE="$(grep -oE '[A-Z2-7]{4}(-[A-Z2-7]{1,4})+' "$WORK/client.log" | head -1)"; [ -n "$CODE" ] && break; sleep 0.2; done
+CODE=""; for _ in $(seq 1 50); do CODE="$(grep -oE '[A-Z2-7]{4}(-[A-Z2-7]{1,4})+' "$WORK/client.log" | head -1)"; [ -n "$CODE" ] && break; sleep 0.2; done
 [ -n "$CODE" ] && [ "${#CODE}" -ge 14 ] && ok "client showed a high-entropy code ($CODE)" || bad "no/short public code shown"
 
 # ── a WRONG code must NOT authorize (operator binds garbage; client never writes it) ──
@@ -150,9 +150,9 @@ sleep 0.3
 # wait for the command's output to be recorded before sending `exit`. A fixed sleep here races zsh +
 # .zshrc startup under load (the loopback "client" borrows the real user's shell config) — poll instead.
 REC_RAW="$RUN/floo/qbox/recording/session.raw"
-{ for i in $(seq 1 80); do grep -aq ';prompt' "$REC_RAW" 2>/dev/null && break; sleep 0.25; done
+{ for _ in $(seq 1 80); do grep -aq ';prompt' "$REC_RAW" 2>/dev/null && break; sleep 0.25; done
   printf 'echo IMARK_$((6*7))\n'
-  for i in $(seq 1 60); do grep -aq 'IMARK_42' "$REC_RAW" 2>/dev/null && break; sleep 0.25; done
+  for _ in $(seq 1 60); do grep -aq 'IMARK_42' "$REC_RAW" 2>/dev/null && break; sleep 0.25; done
   printf 'exit\n'; sleep 0.5; } \
   | timeout 45 env HOME="$OPHOME" PATH="$PATH" ssh -tt -o BatchMode=yes qbox >"$WORK/interactive.log" 2>&1 || true
 sleep 0.3
@@ -164,10 +164,10 @@ grep -rq 'IMARK_42' "$RUN"/floo/qbox/recording/ 2>/dev/null && ok "MANUAL-operat
 # ── Ctrl-C still revokes ──
 note "delivering Ctrl-C to the public client…"
 kill -TERM "$PTYRUN_PID" 2>/dev/null
-for i in $(seq 1 50); do kill -0 "$CLIENT_PID" 2>/dev/null || break; sleep 0.2; done
+for _ in $(seq 1 50); do kill -0 "$CLIENT_PID" 2>/dev/null || break; sleep 0.2; done
 kill -0 "$CLIENT_PID" 2>/dev/null && { bad "public client did not exit on Ctrl-C"; kill -KILL "$CLIENT_PID" 2>/dev/null; } || ok "public client exited on Ctrl-C (revoke ran)"
 CLIENT_PID=""
-for i in $(seq 1 15); do [ -S "$SOCK/$SID.sock" ] || break; sleep 0.2; done
+for _ in $(seq 1 15); do [ -S "$SOCK/$SID.sock" ] || break; sleep 0.2; done
 [ -S "$SOCK/$SID.sock" ] && bad "relay socket still present after revoke" || ok "relay socket released (close = revoke)"
 
 echo
