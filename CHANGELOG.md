@@ -1,4 +1,25 @@
 # Changelog
+## 0.7.2 — 2026-07-11
+
+### Fixed
+- **`floo-powder invite` after pinning someone else's relay.** The invite one-liner and this box's own
+  relay identity now live in separate keys (`SELF_RELAY_{HOST,PORT}` vs the current-relay
+  `RELAY_{HOST,PORT}`), so pointing `floo-powder --relay` at a foreign relay (e.g. a client's) no longer
+  silently overwrites the identity `invite` embeds.
+
+### Added
+- **CI.** GitHub Actions now runs shellcheck (warning level), the full test suite (unit + CA loopbacks +
+  quick loopback), and the embedded-relay drift check on every push and PR — with badges in the README.
+- **`docs/READING.md`** — a section-by-section audit map: how to read the whole codebase in ~20 minutes
+  (client → operator CLI → relay), keyed to the `# ───` section banners.
+- **Section banners in `bin/floo-powder`** (the client already had them), and a fuller annotation on the
+  embedded relay payload explaining *why* half the file is code-as-heredocs.
+
+### Changed
+- shellcheck-clean at warning level: unused loop counters renamed to `_`; the two deliberate patterns
+  (declared-but-unused color palette entries, a literal `~/.ssh/config` shown to the user) carry
+  targeted `# shellcheck disable` directives with reasons.
+
 ## 0.7.1 — 2026-06-18
 
 ### Added

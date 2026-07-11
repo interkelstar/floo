@@ -29,7 +29,7 @@
 
 ## Residual risks (accepted for v1, with rationale)
 
-1. **`curl|bash` integrity.** The published install one-liners pin a **release tag** (e.g. `v0.7.1`)
+1. **`curl|bash` integrity.** The published install one-liners pin a **release tag** (e.g. `v0.7.2`)
    over HTTPS, and a repository ruleset makes `v*` tags **immutable** — it blocks force-move, update, and
    deletion — so a published tag cannot be silently repointed to different code. For strict cryptographic
    immutability you can instead pin a full **commit hash** (the operator one-liner honours
