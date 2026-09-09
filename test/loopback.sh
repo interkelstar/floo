@@ -71,6 +71,7 @@ Match User $ME
     AllowStreamLocalForwarding remote
     StreamLocalBindUnlink yes
     PermitTTY no
+    ExposeAuthInfo yes
     ForceCommand FLOO_RELAY_SOCK_DIR=$SOCK $HELPBIN/floo-route
 CFG
 /usr/sbin/sshd -t -f "$RELAY/sshd_config" || { echo "relay config invalid"; exit 1; }

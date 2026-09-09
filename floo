@@ -62,6 +62,16 @@ warn() { printf '%s⚠%s %s\n' "$Y" "$X" "$*"; }
 
 codehash() { printf '%s' "$1" | sha256sum | cut -c1-64; }   # pairing code never leaves the box in clear
 norm() { printf '%s' "$1" | tr 'a-z' 'A-Z'; }               # uniform code casing for sha256 + HMAC on both ends
+# HMAC-SHA256(key=$1, message=stdin) -> lowercase hex digest. The key is passed to openssl as
+# -macopt hexkey:<hex>, never as a plain -hmac argv value — the pairing code IS the credential in
+# quick/public mode, and a literal argv value is visible to any other local user via `ps`/procfs
+# for as long as the process runs. Hex-encoding doesn't hide it from someone who bothers to decode
+# it, but it does remove the credential from being read off a process listing in the clear.
+hmac_code() {
+  local key="$1" hexkey
+  hexkey="$(printf '%s' "$key" | od -An -tx1 | tr -d ' \n')"
+  openssl dgst -sha256 -mac hmac -macopt "hexkey:$hexkey" | awk '{print $NF}'
+}
 
 # ─── Resolve this box's name (our natural key: the box's unique label). ───────────────────
 # Order: --name / FLOO_NAME -> FLOO_IDENTITY_HOOK (a script printing the name; how a deployment
@@ -112,7 +122,7 @@ snapshot_surface() {
 }
 
 # ─── Build the throwaway SSH endpoint (in tmpfs; nothing on durable disk). ────────────────
-WORKDIR=""; SSHD_PID=""; TUNNEL_PID=""; MONITOR_PID=""; BINDWATCH_PID=""; NAME=""; SID=""; SSHD_PORT=""
+WORKDIR=""; SSHD_PID=""; TUNNEL_PID=""; MONITOR_PID=""; BINDWATCH_PID=""; WATCHDOG_PID=""; NAME=""; SID=""; SSHD_PORT=""
 PAIRCODE=""; BEFORE=""; AFTER=""; MARK_NONCE=""
 
 build_endpoint() {
@@ -359,6 +369,24 @@ start_sshd() {
   SSHD_PID=$!
   sleep 0.4
   kill -0 "$SSHD_PID" 2>/dev/null || { warn "could not start the local endpoint"; cat "$WORKDIR/sshd.log" 2>/dev/null; return 1; }
+  start_sshd_watchdog "$$" "$SSHD_PID"
+}
+
+# The endpoint must not outlive the controller (this floo process). Normally a dropped connection
+# delivers SIGHUP and `teardown` runs on EXIT — but a hard crash or SIGKILL of the controller skips
+# all of that, leaving the throwaway sshd (and the relay's reverse tunnel into it) reachable to
+# anyone who already knows the sid. This background watchdog polls the controller's liveness and,
+# the moment it's gone, kills the sshd's whole process group itself (TERM, then KILL after a grace).
+start_sshd_watchdog() {
+  local ctrl_pid="$1" sshd_pid="$2" poll="${FLOO_WATCHDOG_POLL_INTERVAL:-2}"
+  (
+    while kill -0 "$ctrl_pid" 2>/dev/null; do sleep "$poll"; done
+    kill -TERM "-$sshd_pid" 2>/dev/null
+    sleep 1
+    kill -KILL "-$sshd_pid" 2>/dev/null
+  ) &
+  WATCHDOG_PID=$!
+  disown "$WATCHDOG_PID" 2>/dev/null || true
 }
 
 pairing_code() {
@@ -462,7 +490,7 @@ bind_watcher() {
       got="$(relay_ssh getop "$SID" 2>/dev/null)" || { sleep 2; continue; }
       while IFS=' ' read -r auth opkey; do
         [ -n "$auth" ] && [ -n "$opkey" ] || continue
-        calc="$(printf '%s' "$opkey" | openssl dgst -sha256 -hmac "$(norm "$PAIRCODE")" | awk '{print $NF}')"
+        calc="$(printf '%s' "$opkey" | hmac_code "$(norm "$PAIRCODE")")"
         if [ "$calc" = "$auth" ]; then
           printf '%s\n' "$opkey" > "$WORKDIR/authorized_keys.tmp"; chmod 600 "$WORKDIR/authorized_keys.tmp"
           mv "$WORKDIR/authorized_keys.tmp" "$WORKDIR/authorized_keys"   # atomic swap; live per-connection
@@ -717,6 +745,13 @@ render_stream() {
 # BASH_COMMAND so a command can never be silently mislabeled as a prior one.
 floo_hook_rc() {
   local nonce="${2:-}"
+  # nonce is embedded verbatim into the generated shell-hook script (below) and, via --emit-hook, is
+  # directly attacker/argv-controlled — a nonce containing a quote or shell metacharacter could break
+  # out of the printf format string it's spliced into and inject code into a hook the user's shell
+  # then sources. Reject anything outside a safe, fixed character set before it's ever used.
+  if [ -n "$nonce" ] && ! [[ "$nonce" =~ ^[A-Za-z0-9_-]{1,64}$ ]]; then
+    warn "bad nonce for --emit-hook (must match ^[A-Za-z0-9_-]{1,64}\$)"; return 1
+  fi
   case "$1" in
     bash) cat <<RC
 # floo command-boundary hook (bash). Load the user's normal interactive env first.
@@ -828,6 +863,7 @@ teardown() {
   # renderer) by child PID — so we never need a system-wide pattern kill that could hit another pane.
   [ -n "$MONITOR_PID" ] && { kill "$MONITOR_PID" 2>/dev/null; wait "$MONITOR_PID" 2>/dev/null; }
   [ -n "$BINDWATCH_PID" ] && kill "$BINDWATCH_PID" 2>/dev/null
+  [ -n "$WATCHDOG_PID" ] && kill "$WATCHDOG_PID" 2>/dev/null
   [ -n "$TUNNEL_PID" ] && kill -TERM "-$TUNNEL_PID" 2>/dev/null
   [ -n "$SSHD_PID" ]   && kill -TERM "-$SSHD_PID"   2>/dev/null
   sleep 0.5
@@ -980,6 +1016,11 @@ Usage:
   floo --public             open a NO-CERT session (code-only; any operator with the code, no CA)
   floo --relay H[:P] --operator-ca KEY [--relay-hostkey KEY] [--name N]
                             open a session with the operator passed inline (ad-hoc)
+  floo --relay H[:P] --pin RELAY16[:CA16]
+                            pin-bootstrap: fetch the operator CA from the relay instead of
+                            pasting it. RELAY16 verifies the relay's host key; the optional
+                            :CA16 also verifies the fetched CA (else it's trusted as-is —
+                            floo warns when you omit it).
   floo --operator NAME      pick which saved operator to use
   floo --stop               close a session from another terminal (if its window/connection was lost)
   floo install              copy floo into ~/.local/bin (so you needn't curl it each time)
@@ -1037,17 +1078,23 @@ cmd_install() {
 }
 
 # ── pin-bootstrap: learn the operator's keys from the relay instead of pasting them ──────────
-# Given a short relay fingerprint (--pin), verify the relay's host key matches it, then fetch the
-# operator's PUBLIC CA over that verified connection. Restores the short, paste-safe one-liner
-# while keeping the trust anchor (the out-of-band pin) honest.
+# Given a short relay fingerprint (--pin relay16[:ca16]), verify the relay's host key matches it,
+# then fetch the operator's PUBLIC CA over that verified connection. Restores the short,
+# paste-safe one-liner while keeping the trust anchor (the out-of-band pin) honest. When the
+# optional ca16 half is present, the fetched CA is verified against it too — closing the gap
+# where pin-bootstrap authenticated the RELAY but simply trusted whatever CA it handed back
+# (a compromised/malicious relay could otherwise substitute its own operator identity). Without
+# ca16, behavior is unchanged from before except that it's now explicit, not silent.
 bootstrap_from_relay() {
-  local tmp scanned blob got
+  local tmp scanned blob got pin_relay pin_ca gotca
+  pin_relay="${FLOO_RELAY_PIN%%:*}"
+  case "$FLOO_RELAY_PIN" in *:*) pin_ca="${FLOO_RELAY_PIN#*:}" ;; *) pin_ca="" ;; esac
   scanned="$(ssh-keyscan -t ed25519 -p "$FLOO_RELAY_PORT" "$FLOO_RELAY_HOST" 2>/dev/null)"
   blob="$(awk '{for(i=1;i<=NF;i++) if($i=="ssh-ed25519"){print $(i+1); exit}}' <<<"$scanned")"
   [ -n "$blob" ] || { warn "could not reach the relay at $FLOO_RELAY_HOST:$FLOO_RELAY_PORT to verify the pin."; exit 1; }
   got="$(printf '%s' "$blob" | base64 -d 2>/dev/null | sha256sum | cut -c1-16)"
-  if [ "$got" != "$FLOO_RELAY_PIN" ]; then
-    warn "relay fingerprint ($got) does NOT match your pin ($FLOO_RELAY_PIN) — possible MITM or wrong code. Refusing."; exit 1
+  if [ "$got" != "$pin_relay" ]; then
+    warn "relay fingerprint ($got) does NOT match your pin ($pin_relay) — possible MITM or wrong code. Refusing."; exit 1
   fi
   FLOO_RELAY_HOSTKEY="ssh-ed25519 $blob"   # pin verified → trust this relay host key for the session
   if [ "$FLOO_PUBLIC" = 1 ]; then ok "relay verified (pin matches) — no-cert mode, no operator key to fetch."; return 0; fi
@@ -1060,7 +1107,17 @@ bootstrap_from_relay() {
       "${FLOO_RELAY_USER}@${FLOO_RELAY_HOST}" opconfig 2>/dev/null)"
   rm -rf "$tmp"
   [ -n "$FLOO_OPERATOR_CA" ] || { warn "the relay didn't return an operator CA (has the operator published one?)."; exit 1; }
-  ok "relay verified (pin matches); operator key fetched — nothing to paste."
+  if [ -n "$pin_ca" ]; then
+    gotca="$(awk '{print $2}' <<<"$FLOO_OPERATOR_CA" | base64 -d 2>/dev/null | sha256sum | cut -c1-16)"
+    if [ "$gotca" != "$pin_ca" ]; then
+      FLOO_OPERATOR_CA=""
+      warn "operator CA fingerprint ($gotca) does NOT match your pin ($pin_ca) — possible MITM or a wrong/stale pin. Refusing."; exit 1
+    fi
+    ok "relay verified (pin matches); operator CA verified against your pin — nothing to paste."
+  else
+    warn "pin-bootstrap only verifies the relay — it trusts that relay's operator to supply the right CA. Pass --pin relay16:ca16 to pin the CA too."
+    ok "relay verified (pin matches); operator key fetched — nothing to paste."
+  fi
 }
 
 main() {
@@ -1104,7 +1161,7 @@ main() {
     session)
       [ -n "$NAME" ] || { warn "could not determine this box's name; set FLOO_NAME=…"; exit 1; }
       if [ "$FLOO_PUBLIC" = 1 ]; then
-        [ -n "$FLOO_RELAY_HOST" ] || { warn "no relay configured — pass --relay H[:P] (and --pin FP), or import a config."; exit 1; }
+        [ -n "$FLOO_RELAY_HOST" ] || { warn "no relay configured — pass --relay H[:P] (and --pin FP[:CAFP]), or import a config."; exit 1; }
         command -v openssl >/dev/null 2>&1 || { warn "public mode needs openssl (for the code proof) — install it."; exit 1; }
       else
         [ -n "$FLOO_RELAY_HOST" ] && [ -n "$FLOO_OPERATOR_CA" ] || { warn "no operator configured — pass --relay H --operator-ca KEY, or run 'floo config import' first."; exit 1; }

@@ -51,6 +51,34 @@ socket_live() {
 # unlink stale socket + its meta (self-heals after a power loss / SIGKILL where deregister never ran)
 gc_dead() { local s="$1"; [ -e "$SOCKDIR/$s.sock" ] && ! socket_live "$SOCKDIR/$s.sock" && rm -f "$SOCKDIR/$s.sock" "$SOCKDIR/$s.meta" "$SOCKDIR/$s.binds"; return 0; }
 
+# The base64 blob(s) of the key(s) that actually authenticated THIS connection — populated by
+# sshd's `ExposeAuthInfo yes` (see install-relay.sh's `Match User gw` block) via $SSH_USER_AUTH, a
+# file with one "publickey <algo> <base64>" line per publickey auth attempted (OpenSSH's actual
+# format — the algo prefix IS present, unlike an authorized_keys-style bare base64). This is the
+# connection's REAL identity, unlike anything read from $SSH_ORIGINAL_COMMAND (attacker-controlled
+# argv). We keep only the base64 (3rd field), which is what a bindop record ($SOCKDIR/$sid.binds,
+# stored as "<authhex> algo base64 [comment]") is compared against below.
+caller_key_blobs() {
+  [ -n "${SSH_USER_AUTH:-}" ] && [ -r "$SSH_USER_AUTH" ] || return 0
+  sed -n 's/^publickey //p' "$SSH_USER_AUTH" | awk '{print $2}'
+}
+# does the key that authenticated this connection appear among the keys bound (via bindop) to $sid?
+caller_key_is_bound() {
+  local sid="$1" line bound_b64 caller_b64 keys
+  keys="$(caller_key_blobs)"; [ -n "$keys" ] || return 1
+  [ -f "$SOCKDIR/$sid.binds" ] || return 1
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    bound_b64="$(awk '{print $3}' <<<"$line")"   # line = "<authhex> <algo> <base64> [comment...]"
+    [ -n "$bound_b64" ] || continue
+    while IFS= read -r caller_b64; do
+      [ -n "$caller_b64" ] || continue
+      [ "$caller_b64" = "$bound_b64" ] && return 0
+    done <<<"$keys"
+  done < "$SOCKDIR/$sid.binds"
+  return 1
+}
+
 # count quick sessions whose socket is live (the concurrency cap is on ACTIVE sessions)
 count_quick_live() {
   local n=0 m s; shopt -s nullglob
@@ -143,6 +171,18 @@ case "$cmd" in
   route)
     sid="${A[1]:-}"; valid_sid "$sid" || deny "bad sid"
     socket_live "$SOCKDIR/$sid.sock" || { gc_dead "$sid"; deny "no live socket"; }
+    if [ -f "$SOCKDIR/$sid.meta" ] && [ "$(sed -n 's/^quick=//p' "$SOCKDIR/$sid.meta")" = 1 ]; then
+      # Quick sessions have no client-side certificate on the inner connection, so an
+      # authenticated gw-account holder who merely LEARNS a live sid could otherwise splice into
+      # it. Require the same proof the session already recorded: the caller's key must be one
+      # bindop stored for this sid (i.e. someone who proved knowledge of the pairing code).
+      caller_key_is_bound "$sid" || deny "route: caller key not bound to this session"
+    fi
+    # (Cert/non-quick sessions: the client's own sshd enforces the operator certificate on the
+    # inner connection after the splice, so an unauthorized holder of a live sid can reach this
+    # pivot but cannot complete a session — that check happens beyond this dumb pivot, and no
+    # comparably cheap gate exists at THIS layer without duplicating that trust anchor. Behavior
+    # here is intentionally unchanged for cert sessions.)
     log "route $sid -> ${SSH_CONNECTION%% *}"
     exec nc -U "$SOCKDIR/$sid.sock"
     ;;

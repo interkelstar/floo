@@ -50,6 +50,28 @@ if [ -t 1 ]; then B=$'\e[1m'; D=$'\e[2m'; G=$'\e[32m'; Y=$'\e[33m'; R=$'\e[31m';
 die() { printf '%serror:%s %s\n' "$R" "$X" "$*" >&2; exit 1; }
 valid_handle() { [[ "$1" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,62}$ ]] || die "bad session handle: $1"; }
 codehash() { printf '%s' "$1" | sha256sum | cut -c1-64; }
+single_line() { [[ "$1" != *$'\n'* ]]; }
+
+# The relay's `resolve` reply is untrusted input: it comes over the network from a relay we may
+# not own (--relay), and even our own relay could be compromised or buggy. Never assume the
+# relay-side validation (relay/floo-route's register-time checks) still holds by the time we act
+# on it — validate every field again here before it is written into an ssh_config drop-in, used
+# as a file/dir path component, or handed to ssh. `single_line` guards against a reply that
+# smuggles extra "key=value\n..." lines into a field via the sed extraction (e.g. a malicious or
+# compromised relay echoing back attacker-controlled text) — a multi-line match is always rejected
+# outright rather than silently taking the first/last line.
+validate_meta() {
+  single_line "$sid"       || die "malformed sid in relay reply (multi-line)"
+  [[ "$sid" =~ ^[a-f0-9]{16}$ ]] || die "malformed sid in relay reply"
+  single_line "$loginuser" || die "malformed loginuser in relay reply (multi-line)"
+  [[ "$loginuser" =~ ^[a-z_][a-z0-9_-]{0,31}$ ]] || die "malformed loginuser in relay reply"
+  single_line "$label"     || die "malformed label in relay reply (multi-line)"
+  [[ "$label" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,39}$ ]] || die "malformed label in relay reply"
+  single_line "$hostkey"   || die "malformed hostkey in relay reply (multi-line)"
+  [[ "$hostkey" =~ ^ssh-ed25519\ [A-Za-z0-9+/=]+$ ]] || die "malformed hostkey in relay reply"
+  single_line "$quick"     || die "malformed quick flag in relay reply (multi-line)"
+  [[ "$quick" =~ ^[01]?$ ]] || die "malformed quick flag in relay reply"
+}
 
 # ─── Relay plumbing: ~/.ssh wiring + the gw channel every command talks through. ──────────
 ensure_ssh_wiring() {
@@ -135,6 +157,7 @@ cmd_connect() {
   quick="$(sed -n 's/^quick=//p' <<<"$meta")"
   { [ -n "$sid" ] && [ -n "$hostkey" ]; } || die "the relay returned an incomplete session record"
   loginuser="${loginuser:-$label}"
+  validate_meta
   echo "${G}✓ code matches — this is the genuine session (resolved at the relay)${X}"
 
   # friendly handle: the client's label if it's free, else the sid (both unique on this operator box)
@@ -146,7 +169,7 @@ cmd_connect() {
   printf '%s %s
 ' "$handle" "$hostkey" > "$sdir/known_hosts"          # pin the client host key under the alias
   ssh-keygen -t ed25519 -f "$sdir/opkey" -N '' -q -C "op-$sid"
-  local certline="" waitline=""
+  local certline="" waitline="" relay_auth_key="$RELAY_KEY"
   if [ "$quick" = 1 ]; then
     # NO-CERT (quick) mode: there is no CA. Bind an ephemeral key to the session with a code-proof —
     # HMAC(code, opkey). Only the code-holder can forge it, so the client authorizes only this key.
@@ -159,6 +182,13 @@ cmd_connect() {
       || die "the relay refused the operator bind — quick mode may be off on this relay, or too many binds."
     echo "${D}no CA: bound an ephemeral key to the session by code-proof (HMAC) — TeamViewer-style${X}"
     waitline=1   # the client authorizes our key after verifying the proof; wait for it below
+    # For quick sessions, authenticate the RELAY leg (the ProxyCommand below) with this SAME
+    # ephemeral key, not the operator's persistent RELAY_KEY. The relay's `route` gate checks the
+    # actual authenticated key (via sshd's ExposeAuthInfo) against $SOCKDIR/$sid.binds — which
+    # only ever contains keys proven via bindop's code-proof (this one). Using RELAY_KEY here
+    # would authenticate as an identity the relay never bound to this sid, and the gate would
+    # (correctly) refuse it.
+    relay_auth_key="$sdir/opkey"
   else
     ssh-keygen -s "$CA" -I "op-$sid-$(date -u +%Y%m%dT%H%M%SZ)" -n "$sid" -V +60m "$sdir/opkey.pub" >/dev/null
     echo "${D}minted a 60-minute certificate (principal=$sid)${X}"
@@ -171,7 +201,7 @@ Host $handle
     HostName $handle
     HostKeyAlias $handle
     User $loginuser
-    ProxyCommand ssh -p "$RELAY_PORT" -i "$RELAY_KEY" -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile="$FLOO_HOME/relay_known_hosts" "$RELAY_USER@$RELAY_HOST" route "$sid"
+    ProxyCommand ssh -p "$RELAY_PORT" -i "$relay_auth_key" -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile="$FLOO_HOME/relay_known_hosts" "$RELAY_USER@$RELAY_HOST" route "$sid"
     IdentityFile "$sdir/opkey"
 $certline
     IdentitiesOnly yes
@@ -189,12 +219,12 @@ CONF
       # `floo-probe` is a liveness token the client's recorder special-cases (succeed silently, record
       # nothing, no "connected" flicker). -n so we never forward our stdin (the recorder reads stdin to
       # EOF before running a command, so a probe forwarding an open terminal would hang us both forever).
-      ssh -n -o BatchMode=yes -o ConnectTimeout=8 "$handle" floo-probe 2>/dev/null && break
+      ssh -n -o BatchMode=yes -o ConnectTimeout=8 -- "$handle" floo-probe 2>/dev/null && break
       sleep 1
     done
   fi
   echo "${G}✓ session ready${X} — ${B}ssh $handle${X} / ${B}rsync … $handle:${X} / ${B}floo-powder exec $handle${X}"
-  if [ "$shell" = 1 ]; then echo "${D}opening a shell… (their floo window shows your commands live)${X}"; exec ssh "$handle"; fi
+  if [ "$shell" = 1 ]; then echo "${D}opening a shell… (their floo window shows your commands live)${X}"; exec ssh -- "$handle"; fi
 }
 
 
@@ -203,7 +233,7 @@ cmd_exec() {
   valid_handle "$h"
   [ -f "$SSH_DROPIN_DIR/$h.conf" ] || die "no active session '$h' — run 'floo-powder connect <code>' first."
   # the bot/audit path: feed a script over a non-interactive shell. Recorded on the client side.
-  ssh -o BatchMode=yes "$h" 'bash -s'
+  ssh -o BatchMode=yes -- "$h" 'bash -s'
 }
 
 cmd_close() {
@@ -261,9 +291,22 @@ cmd_relay_install() {
 
 cmd_init() {
   cmd_ca_init >/dev/null
-  local host="${FLOO_RELAY_PUBLIC_HOST:-$(curl -fsS --max-time 5 ifconfig.me 2>/dev/null)}"
+  local host="${FLOO_RELAY_PUBLIC_HOST:-$(curl -fsS --max-time 5 https://ifconfig.me 2>/dev/null)}"
   local port="${FLOO_RELAY_PORT:-443}"
   [ -n "$host" ] || die "could not determine the relay's public host — set FLOO_RELAY_PUBLIC_HOST=<host>"
+  # ifconfig.me's response becomes RELAY_HOST, written to relay.env and handed to sshd/print_oneliner —
+  # a poisoned/MITM'd response (or an unexpected non-address body) must never reach that. Only a bare
+  # hostname, IPv4, or IPv6 literal is accepted; anything else (shell metacharacters, whitespace,
+  # multi-line, HTML error pages...) is refused outright.
+  valid_public_host() {
+    local h="$1"
+    [[ "$h" =~ ^[A-Za-z0-9.-]+$ ]] && return 0                        # hostname or IPv4
+    [[ "$h" == *:* ]] && [[ "$h" =~ ^[0-9A-Fa-f:]+$ ]] && return 0     # bare IPv6 literal
+    return 1
+  }
+  if [ -z "${FLOO_RELAY_PUBLIC_HOST:-}" ]; then
+    valid_public_host "$host" || die "ifconfig.me returned something that doesn't look like a host/IP ('$host') — set FLOO_RELAY_PUBLIC_HOST=<host> instead."
+  fi
   if [ -z "${FLOO_INIT_NO_RELAY:-}" ]; then
     echo "standing up the relay on this box (sudo)…"
     cmd_relay_install
@@ -388,6 +431,34 @@ socket_live() {
 # unlink stale socket + its meta (self-heals after a power loss / SIGKILL where deregister never ran)
 gc_dead() { local s="$1"; [ -e "$SOCKDIR/$s.sock" ] && ! socket_live "$SOCKDIR/$s.sock" && rm -f "$SOCKDIR/$s.sock" "$SOCKDIR/$s.meta" "$SOCKDIR/$s.binds"; return 0; }
 
+# The base64 blob(s) of the key(s) that actually authenticated THIS connection — populated by
+# sshd's `ExposeAuthInfo yes` (see install-relay.sh's `Match User gw` block) via $SSH_USER_AUTH, a
+# file with one "publickey <algo> <base64>" line per publickey auth attempted (OpenSSH's actual
+# format — the algo prefix IS present, unlike an authorized_keys-style bare base64). This is the
+# connection's REAL identity, unlike anything read from $SSH_ORIGINAL_COMMAND (attacker-controlled
+# argv). We keep only the base64 (3rd field), which is what a bindop record ($SOCKDIR/$sid.binds,
+# stored as "<authhex> algo base64 [comment]") is compared against below.
+caller_key_blobs() {
+  [ -n "${SSH_USER_AUTH:-}" ] && [ -r "$SSH_USER_AUTH" ] || return 0
+  sed -n 's/^publickey //p' "$SSH_USER_AUTH" | awk '{print $2}'
+}
+# does the key that authenticated this connection appear among the keys bound (via bindop) to $sid?
+caller_key_is_bound() {
+  local sid="$1" line bound_b64 caller_b64 keys
+  keys="$(caller_key_blobs)"; [ -n "$keys" ] || return 1
+  [ -f "$SOCKDIR/$sid.binds" ] || return 1
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    bound_b64="$(awk '{print $3}' <<<"$line")"   # line = "<authhex> <algo> <base64> [comment...]"
+    [ -n "$bound_b64" ] || continue
+    while IFS= read -r caller_b64; do
+      [ -n "$caller_b64" ] || continue
+      [ "$caller_b64" = "$bound_b64" ] && return 0
+    done <<<"$keys"
+  done < "$SOCKDIR/$sid.binds"
+  return 1
+}
+
 # count quick sessions whose socket is live (the concurrency cap is on ACTIVE sessions)
 count_quick_live() {
   local n=0 m s; shopt -s nullglob
@@ -480,6 +551,18 @@ case "$cmd" in
   route)
     sid="${A[1]:-}"; valid_sid "$sid" || deny "bad sid"
     socket_live "$SOCKDIR/$sid.sock" || { gc_dead "$sid"; deny "no live socket"; }
+    if [ -f "$SOCKDIR/$sid.meta" ] && [ "$(sed -n 's/^quick=//p' "$SOCKDIR/$sid.meta")" = 1 ]; then
+      # Quick sessions have no client-side certificate on the inner connection, so an
+      # authenticated gw-account holder who merely LEARNS a live sid could otherwise splice into
+      # it. Require the same proof the session already recorded: the caller's key must be one
+      # bindop stored for this sid (i.e. someone who proved knowledge of the pairing code).
+      caller_key_is_bound "$sid" || deny "route: caller key not bound to this session"
+    fi
+    # (Cert/non-quick sessions: the client's own sshd enforces the operator certificate on the
+    # inner connection after the splice, so an unauthorized holder of a live sid can reach this
+    # pivot but cannot complete a session — that check happens beyond this dumb pivot, and no
+    # comparably cheap gate exists at THIS layer without duplicating that trust anchor. Behavior
+    # here is intentionally unchanged for cert sessions.)
     log "route $sid -> ${SSH_CONNECTION%% *}"
     exec nc -U "$SOCKDIR/$sid.sock"
     ;;
@@ -589,6 +672,14 @@ FLOO_EMBED_EOF_AUTHKEYS
 set -euo pipefail
 
 PORT="${FLOO_RELAY_PORT:-443}"
+# FLOO_RELAY_PORT is templated straight into sshd_config and the fail2ban jail below — validate it's
+# a plain integer in the valid TCP port range before it ever reaches either config file.
+case "$PORT" in
+  ''|*[!0-9]*) echo "bad FLOO_RELAY_PORT: '$PORT' (must be an integer 1-65535)" >&2; exit 1 ;;
+esac
+if [ "$PORT" -lt 1 ] || [ "$PORT" -gt 65535 ]; then
+  echo "bad FLOO_RELAY_PORT: '$PORT' (must be an integer 1-65535)" >&2; exit 1
+fi
 SOCKDIR="/run/floo"
 ETC="/etc/floo"
 SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -758,6 +849,11 @@ Match User gw
     AllowStreamLocalForwarding remote  # allows ONLY the client's reverse unix socket
     StreamLocalBindUnlink yes
     PermitTTY no
+    # Exposes the key that actually authenticated THIS connection to floo-route via the
+    # SSH_USER_AUTH env var (a "publickey <base64-blob>" line per method used) — the dispatcher's
+    # `route` uses it to confirm a quick-mode caller is the operator who completed bindop for that
+    # sid, instead of trusting whatever key text an attacker's argv claims to be.
+    ExposeAuthInfo yes
     ForceCommand /usr/local/bin/floo-route
 CFG
 "$SSHD_BIN" -t -f "$ETC/relay_sshd_config" && echo "   sshd config OK"

@@ -71,6 +71,12 @@ fetches the operator's key *from* the relay — so there are no long keys to pas
 terminal to fold and corrupt). The URL is a version tag, so you run exactly the code you can read at
 `github.com/interkelstar/floo/tree/v0.7.2`.
 
+`--pin` also accepts a second, optional half: `--pin RELAY16:CA16`. The first 16 hex verify the
+relay's host key (as above); the second 16 hex additionally verify the operator CA fetched *from*
+that relay, closing the gap where a compromised/malicious relay could otherwise hand back a CA of
+its own choosing. Without the `:CA16` half, `floo` still works exactly as before — it just prints a
+one-line warning that it's trusting the relay's operator to supply the right CA.
+
 …or, if you'll get support more than once, **install it and save your operator once**:
 
 ```sh

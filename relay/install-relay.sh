@@ -17,6 +17,14 @@
 set -euo pipefail
 
 PORT="${FLOO_RELAY_PORT:-443}"
+# FLOO_RELAY_PORT is templated straight into sshd_config and the fail2ban jail below — validate it's
+# a plain integer in the valid TCP port range before it ever reaches either config file.
+case "$PORT" in
+  ''|*[!0-9]*) echo "bad FLOO_RELAY_PORT: '$PORT' (must be an integer 1-65535)" >&2; exit 1 ;;
+esac
+if [ "$PORT" -lt 1 ] || [ "$PORT" -gt 65535 ]; then
+  echo "bad FLOO_RELAY_PORT: '$PORT' (must be an integer 1-65535)" >&2; exit 1
+fi
 SOCKDIR="/run/floo"
 ETC="/etc/floo"
 SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -186,6 +194,11 @@ Match User gw
     AllowStreamLocalForwarding remote  # allows ONLY the client's reverse unix socket
     StreamLocalBindUnlink yes
     PermitTTY no
+    # Exposes the key that actually authenticated THIS connection to floo-route via the
+    # SSH_USER_AUTH env var (a "publickey <base64-blob>" line per method used) — the dispatcher's
+    # `route` uses it to confirm a quick-mode caller is the operator who completed bindop for that
+    # sid, instead of trusting whatever key text an attacker's argv claims to be.
+    ExposeAuthInfo yes
     ForceCommand /usr/local/bin/floo-route
 CFG
 "$SSHD_BIN" -t -f "$ETC/relay_sshd_config" && echo "   sshd config OK"
