@@ -1,23 +1,23 @@
 #!/usr/bin/env bash
-# floo-go — the no-flags entry for the person who needs help:
+# floo-sh — the no-flags entry for the person who needs help:
 #
-#     curl -s https://floo.run/go | bash
+#     curl -s https://floo.run/sh | bash
 #
 # Fetches the floo client of ONE pinned release tag (never `main`) and starts it in quick
 # (--public) mode. The public relay and its host-key pin are built into that client, so nothing
 # else has to be typed; the code to read out loud appears on screen.
 #
 # This file is the only thing you run blind. Read the client it fetches before trusting it:
-#     https://github.com/interkelstar/floo/blob/v0.8.0/floo
+#     https://github.com/interkelstar/floo/blob/v0.8.1/floo
 # or do it by hand:  curl -fsSL https://floo.run -o floo && less floo && bash floo --public
 set -eu
-TAG="${FLOO_GO_TAG:-v0.8.0}"
+TAG="${FLOO_GO_TAG:-v0.8.1}"
 URL="https://raw.githubusercontent.com/interkelstar/floo/$TAG/floo"
 
-command -v curl >/dev/null 2>&1 || { echo "floo-go: curl is required" >&2; exit 1; }
+command -v curl >/dev/null 2>&1 || { echo "floo-sh: curl is required" >&2; exit 1; }
 tmp="$(mktemp "${TMPDIR:-/tmp}/floo.XXXXXX")"
 trap 'rm -f "$tmp"' EXIT
-curl -fsSL "$URL" -o "$tmp" || { echo "floo-go: could not fetch $URL" >&2; exit 1; }
-head -n1 "$tmp" | grep -q '^#!' || { echo "floo-go: $URL did not return a script" >&2; exit 1; }
+curl -fsSL "$URL" -o "$tmp" || { echo "floo-sh: could not fetch $URL" >&2; exit 1; }
+head -n1 "$tmp" | grep -q '^#!' || { echo "floo-sh: $URL did not return a script" >&2; exit 1; }
 echo "floo $TAG from $URL" >&2
 bash "$tmp" --public

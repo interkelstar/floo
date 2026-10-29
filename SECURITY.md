@@ -17,7 +17,7 @@ formal response-time promise.
 ## In scope
 
 - The client, `floo`.
-- The operator tool, `floo-powder` (and `floo-go`).
+- The operator tool, `floo-powder` (and `floo-sh`).
 - The relay scripts in `relay/` (`install-relay.sh`, `floo-route`, `floo-authkeys`).
 - The floo.run Worker in `web/`.
 

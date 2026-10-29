@@ -1,13 +1,14 @@
 // floo.run — the short entry point.
 //
-//   curl -s https://floo.run/go | bash
+//   curl -s https://floo.run/sh | bash
 //
 // This Worker serves the bytes of ONE pinned release tag straight from GitHub; it never
 // serves `main`. The tag is a constant below and moves only with a deploy, so "what you
 // read on GitHub under that tag is what you run" holds for the short URL too.
 //
 //   /            -> floo            (the client, pinned tag)
-//   /go          -> bin/floo-go     (no-flags wrapper: fetches the tag's floo, runs --public)
+//   /sh          -> bin/floo-sh     (no-flags wrapper: fetches the tag's floo, runs --public)
+//   /go          -> the same file (the name used by v0.8.1 texts)
 //   /powder      -> bin/floo-powder (the operator script, pinned tag)
 //   /vX.Y.Z      -> floo at that tag
 //   /vX.Y.Z/powder
@@ -15,14 +16,15 @@
 //
 // A browser (Accept: text/html) asking for / gets a one-screen landing page instead.
 
-const TAG = "v0.8.0";
+const TAG = "v0.8.1";
 const REPO = "interkelstar/floo";
 const FILES = {
   "": "floo",
   "floo": "floo",
   "powder": "bin/floo-powder",
   "floo-powder": "bin/floo-powder",
-  "go": "bin/floo-go", // `curl -s https://floo.run/go | bash` — no flags; exists from v0.8.0
+  "sh": "bin/floo-sh", // `curl -s https://floo.run/sh | bash` — no flags; exists from v0.8.1
+  "go": "bin/floo-sh", // v0.8.1 spelled it /go; kept so that text keeps working
 };
 const TAG_RE = /^v\d+\.\d+\.\d+$/;
 
@@ -57,15 +59,15 @@ a{color:var(--acc)}
 nothing listens, nothing runs as root, and <strong>Ctrl-C</strong> ends it. Two bash files; read them before you run them.</p>
 
 <h2>They need help — they run this and read you the code it prints</h2>
-<pre><code>curl -s https://floo.run/go | bash</code></pre>
+<pre><code>curl -s https://floo.run/sh | bash</code></pre>
 
 <h2>You're helping — paste this with their code</h2>
 <pre><code>bash &lt;(curl -s https://floo.run/powder) connect THE-CODE</code></pre>
 
 <h2>Don't trust us — read us</h2>
 <p>This domain serves the bytes of release <a href="https://github.com/${REPO}/tree/${tag}"><code>${tag}</code></a>, never <code>main</code>;
-tags in the repository are immutable. <code>floo.run</code> is <a href="${raw}/floo">floo</a>, <code>floo.run/go</code> is a
-<a href="${raw}/bin/floo-go">20-line wrapper</a> that fetches that <code>floo</code> and starts it in quick mode (the public relay
+tags in the repository are immutable. <code>floo.run</code> is <a href="${raw}/floo">floo</a>, <code>floo.run/sh</code> is a
+<a href="${raw}/bin/floo-sh">20-line wrapper</a> that fetches that <code>floo</code> and starts it in quick mode (the public relay
 <code>relay.floo.run</code> and its host-key pin are constants inside <code>floo</code> itself), <code>floo.run/powder</code> is
 <a href="${raw}/bin/floo-powder">floo-powder</a>, <code>floo.run/version</code> says which tag. Download, read, then run:</p>
 <pre><code>curl -fsSL https://floo.run -o floo &amp;&amp; less floo &amp;&amp; bash floo --public</code></pre>

@@ -17,7 +17,7 @@ with that code and they're in — the session is recorded to the helped box's di
 **🆘 You need help** — run this, then read the helper the code it shows:
 
 ```sh
-curl -s https://floo.run/go | bash
+curl -s https://floo.run/sh | bash
 ```
 
 **🧑‍🔧 You're helping** — paste this with the code they read you (opens a shell on their box):
@@ -26,13 +26,13 @@ curl -s https://floo.run/go | bash
 bash <(curl -s https://floo.run/powder) connect THE-CODE-THEY-READ
 ```
 
-`floo.run` serves the bytes of the pinned tag (v0.8.0), never `main` (the Worker behind it is in
-[`web/`](web/)); `/go` is a 20-line wrapper ([`bin/floo-go`](bin/floo-go)) that fetches that tag's `floo`
+`floo.run` serves the bytes of the pinned tag (v0.8.1), never `main` (the Worker behind it is in
+[`web/`](web/)); `/sh` is a 20-line wrapper ([`bin/floo-sh`](bin/floo-sh)) that fetches that tag's `floo`
 and starts it with `--public`. The same thing spelled out, straight from GitHub:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/interkelstar/floo/v0.8.0/floo | bash -s -- --public
-bash <(curl -fsSL https://raw.githubusercontent.com/interkelstar/floo/v0.8.0/bin/floo-powder) connect THE-CODE-THEY-READ
+curl -fsSL https://raw.githubusercontent.com/interkelstar/floo/v0.8.1/floo | bash -s -- --public
+bash <(curl -fsSL https://raw.githubusercontent.com/interkelstar/floo/v0.8.1/bin/floo-powder) connect THE-CODE-THEY-READ
 ```
 
 No accounts, no installs, no relay to run. The **code is the only secret** — read it to the one person
@@ -75,14 +75,14 @@ Only when you want help. Whoever's helping you hands you a one-line command — 
 the pairing code it prints:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/interkelstar/floo/v0.8.0/floo \
+curl -fsSL https://raw.githubusercontent.com/interkelstar/floo/v0.8.1/floo \
   | bash -s -- --relay relay.example.com --pin 0123456789abcdef
 ```
 
 The `--pin` is a short fingerprint of the operator's relay. `floo` verifies the relay against it, then
 fetches the operator's key *from* the relay — so there are no long keys to paste (and nothing for a
 terminal to fold and corrupt). The URL is a version tag, so you run exactly the code you can read at
-`github.com/interkelstar/floo/tree/v0.8.0`.
+`github.com/interkelstar/floo/tree/v0.8.1`.
 
 `--pin` also accepts a second, optional half: `--pin RELAY16:CA16`. The first 16 hex verify the
 relay's host key (as above); the second 16 hex additionally verify the operator CA fetched *from*
@@ -135,7 +135,7 @@ nothing else to clone and you can audit exactly what gets root. Fetch it, read i
 your relay:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/interkelstar/floo/v0.8.0/bin/floo-powder -o floo-powder
+curl -fsSL https://raw.githubusercontent.com/interkelstar/floo/v0.8.1/bin/floo-powder -o floo-powder
 less floo-powder                     # read it — incl. the embedded relay that `init` sudo-runs, inline + readable
 sh floo-powder install               # install into ~/.local/bin (self-fetches if piped)
 floo-powder init                     # turnkey: keys + stands up the embedded relay + prints the client one-liner
@@ -202,10 +202,10 @@ Helping a friend (or getting help) and neither of you wants to run a relay? Use 
 
 ```bash
 # the person who needs help (the client) runs this and reads back the code it prints:
-curl -fsSL https://raw.githubusercontent.com/interkelstar/floo/v0.8.0/floo | bash -s -- --public
+curl -fsSL https://raw.githubusercontent.com/interkelstar/floo/v0.8.1/floo | bash -s -- --public
 
 # the person helping (the operator) — zero install, just connect with that code:
-bash <(curl -fsSL https://raw.githubusercontent.com/interkelstar/floo/v0.8.0/bin/floo-powder) connect <code>
+bash <(curl -fsSL https://raw.githubusercontent.com/interkelstar/floo/v0.8.1/bin/floo-powder) connect <code>
 # (or, if they'll help often: install floo-powder once, then `floo-powder connect <code>`)
 ```
 

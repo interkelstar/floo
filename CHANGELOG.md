@@ -1,4 +1,16 @@
 # Changelog
+## 0.8.1 — 2026-10-30
+
+### Fixed
+- **relay installer:** on SELinux hosts the socket directory is labelled so sshd can create client
+  sockets; without it every session fails with `unix_listener: cannot bind … Permission denied` (the
+  public relay was affected). Re-run `floo-powder relay-install` from 0.8.1.
+
+### Changed
+- The no-flags wrapper is `bin/floo-sh`, served at `floo.run/sh` («what you type in a terminal»):
+  `curl -s https://floo.run/sh | bash`. `floo.run/go` keeps serving the same file for texts that
+  quoted the 0.8.0 spelling.
+
 ## 0.8.0 — 2026-10-29
 
 Built-in public relay defaults: the shortest honest commands are now

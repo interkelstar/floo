@@ -97,6 +97,7 @@ uninstall() {
   id gw >/dev/null 2>&1 && { userdel -r gw 2>/dev/null || userdel gw 2>/dev/null || true; }
   if command -v semanage >/dev/null 2>&1; then
     semanage port -d -t ssh_port_t -p tcp "$up" 2>/dev/null || true
+    semanage fcontext -d "$SOCKDIR(/.*)?" 2>/dev/null || true
   fi
   echo "relay fully uninstalled — service, helpers, $ETC, $SOCKDIR, the gw user, SELinux label, and the firewall"
   echo "opening are all removed. Your operator keys in ~/.config/floo are untouched."
@@ -231,6 +232,18 @@ if command -v semanage >/dev/null 2>&1 && [ "$SE" != Disabled ]; then
       || semanage port -m -t ssh_port_t -p tcp "$PORT" 2>/dev/null \
       || echo "   ! could not relabel tcp/$PORT — the relay may fail to bind under SELinux"
   fi
+  # Socket dir: /run/floo defaults to var_run_t, where sshd-session may not create the client's
+  # reverse socket (2026-10-29: avc: denied { create } for comm="sshd-session" scontext=…sshd_session_t tcontext=…var_run_t tclass=sock_file).
+  # Stock policy allows sshd_session_t/sshd_t create+unlink of sock_file and add/remove_name in
+  # user_tmp_type dirs, so the dir is labelled user_tmp_t (what /run/user and /tmp sockets carry).
+  # The fcontext rule persists: tmpfiles applies it when it recreates the dir on every boot.
+  echo "==> SELinux: labeling $SOCKDIR as user_tmp_t (sshd must create client sockets there)"
+  semanage fcontext -a -t user_tmp_t "$SOCKDIR(/.*)?" 2>/dev/null \
+    || semanage fcontext -m -t user_tmp_t "$SOCKDIR(/.*)?" 2>/dev/null \
+    || echo "   ! could not label $SOCKDIR — under SELinux every session may fail with 'unix_listener: cannot bind … Permission denied'"
+  restorecon -R "$SOCKDIR" 2>/dev/null || echo "   ! restorecon $SOCKDIR failed — run it by hand"
+elif [ "$SE" = Enforcing ]; then
+  echo "   ! $SOCKDIR not labeled for SELinux (no semanage) — sessions will fail with 'unix_listener: cannot bind … Permission denied'"
 fi
 
 echo "==> systemd unit"

@@ -21,6 +21,7 @@ bash "$DIR/unit/dispatcher.sh" || rc=1
   bash "$DIR/unit/route_bind_gate.sh" || rc=1
   bash "$DIR/unit/init_host.sh" || rc=1
   bash "$DIR/unit/hardening_misc.sh" || rc=1
+  bash "$DIR/unit/selinux_sockdir.sh" || rc=1
 
 echo; echo "########## loopback A: clean session (no surface change) ##########"
 bash "$DIR/loopback.sh" || rc=1
