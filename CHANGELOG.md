@@ -1,4 +1,42 @@
 # Changelog
+## 0.7.3 — 2026-10-29
+
+Security hardening from a two-scanner audit. Fixes landed on `main` on 2026-09-09; this tag makes
+them reachable from the pinned install one-liners in the README.
+
+### Security
+- **The operator no longer trusts what the relay hands back.** `floo-powder connect` re-validates every
+  field of the relay's `resolve` reply (session id, login user, label, host key, quick flag) against the
+  same shapes the relay enforces, and rejects multi-line values, before anything is written into an
+  ssh_config drop-in or used as a path. `--` now precedes the session handle on the `ssh` calls that take it.
+- **Route ownership gate (quick sessions).** `floo-route route` now requires the caller's authenticated
+  key to be one that was bound to that session by the code-proof (`bindop`); merely learning a live
+  session id is no longer enough to splice into a quick session. Needs `ExposeAuthInfo yes` in the
+  relay's `gw` sshd block (added by `install-relay.sh`, so re-run it on an existing relay). Cert
+  sessions are unchanged: the client's sshd still enforces the operator certificate.
+- **sshd watchdog.** The throwaway sshd's process group is now killed (TERM, then KILL) when the
+  controlling `floo` process is gone, so a hard crash or SIGKILL can no longer leave the endpoint up.
+- **Two-part `--pin RELAY16[:CA16]`.** The optional second half pins the operator CA fetched from the
+  relay, so a malicious relay can't substitute its own CA; a mismatch refuses and stores nothing. A
+  one-part `--pin` still works, but `floo` now says plainly that it trusts the relay's operator for the CA.
+- **Smaller input and argv hardening.** `floo-powder init` fetches the public host over HTTPS and accepts
+  only a bare hostname or IP literal; `install-relay.sh` validates `FLOO_RELAY_PORT` as an integer in
+  1-65535; `floo --emit-hook` validates its nonce (`^[A-Za-z0-9_-]{1,64}$`); the pairing-code HMAC key
+  is passed to openssl as `-macopt hexkey:` rather than a plain `-hmac` argv value.
+
+### Fixed
+- **Quick-session relay leg authenticated with the wrong key.** The operator's ProxyCommand used the
+  persistent relay key; for quick sessions it now uses the session's ephemeral key, the one the relay
+  actually bound (otherwise the new route gate would refuse it).
+
+### Added
+- Six unit suites (connect-reply validation, watchdog, pin bootstrap, route bind gate, init host
+  validation, misc hardening), wired into `test/run-all.sh`.
+
+### Changed
+- README: install one-liners and the tag link pin `v0.7.3`; `--pin RELAY16:CA16` documented.
+- `demo.gif` re-recorded.
+
 ## 0.7.2 — 2026-07-11
 
 ### Fixed
