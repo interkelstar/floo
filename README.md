@@ -2,6 +2,8 @@
 
 [![CI](https://github.com/interkelstar/floo/actions/workflows/ci.yml/badge.svg)](https://github.com/interkelstar/floo/actions/workflows/ci.yml)
 [![shellcheck](https://img.shields.io/badge/shellcheck-clean-brightgreen)](https://github.com/interkelstar/floo/actions/workflows/ci.yml)
+[![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/interkelstar/floo/badge)](https://scorecard.dev/viewer/?uri=github.com/interkelstar/floo)
+[Security policy](SECURITY.md)
 
 **Temporary, recorded, instantly-revocable remote console access** — TeamViewer's convenience with a
 bastion's security posture, for the terminal. You hand it to someone whose box you *don't* own.

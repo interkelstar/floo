@@ -22,6 +22,31 @@ jobs:
             test/run-all.sh test/loopback.sh test/quick-loopback.sh test/relay-debian.sh \
             test/unit/*.sh
 
+  shellcheck-sarif:
+    name: shellcheck to code scanning
+    runs-on: ubuntu-latest
+    permissions:
+      security-events: write
+      contents: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      # ShellCheck itself has no SARIF output (0.11.0: checkstyle, diff, gcc, json, json1, quiet, tty);
+      # shellcheck-sarif converts its json1 output.
+      - name: install shellcheck-sarif
+        run: cargo install shellcheck-sarif --version 0.8.0 --locked
+      - name: shellcheck (warning level) as SARIF
+        run: |
+          shellcheck -S warning -f json1 \
+            floo bin/floo-powder bin/floo-go \
+            relay/floo-route relay/floo-authkeys relay/install-relay.sh \
+            test/run-all.sh > shellcheck.json || true
+          shellcheck-sarif < shellcheck.json > shellcheck.sarif
+      - name: upload to code scanning
+        uses: github/codeql-action/upload-sarif@4bfa242aa49c5f7c6770b98670d354a7dfac05f8 # v3
+        with:
+          sarif_file: shellcheck.sarif
+          category: shellcheck
+
   test:
     name: full suite (unit + CA loopbacks + quick loopback)
     runs-on: ubuntu-latest
