@@ -1,4 +1,31 @@
 # Changelog
+## 0.8.0 — 2026-10-29
+
+Built-in public relay defaults: the shortest honest commands are now
+`curl -sL floo.run/go | bash` and `bash <(curl -sL floo.run/powder) connect CODE`.
+
+### Added
+- **`bin/floo-go`** — the no-flags entry served at `floo.run/go`: 20 readable lines that fetch this tag's
+  `floo` from GitHub and start it with `--public`. The only thing a helped person runs unread; the client
+  it fetches is the tag's bytes.
+- **`relay.floo.run` is the public relay.** It is the same box with the same host key as
+  `floo.kelstar.me`, so the pin is unchanged (`df2b83ff925f89bd`).
+- **New constants near the top of `floo` and `bin/floo-powder`:** `FLOO_PUBLIC_RELAY_HOST=relay.floo.run`,
+  `FLOO_PUBLIC_RELAY_PORT=443`, `FLOO_PUBLIC_RELAY_PIN=df2b83ff925f89bd` (16-hex relay host-key
+  fingerprint; no CA half, quick mode uses no CA). Each can be overridden by env like the other `FLOO_*`
+  settings. The defaults live in the files, not in a URL, so the bytes `floo.run` serves are exactly the tag's.
+- `floo --public` with no `--relay` (and no saved config) uses the public relay and its pin and prints one
+  line naming the relay and saying the pin is built in. `floo-powder connect CODE` with no `--relay` and no
+  saved relay does the same.
+- `test/unit/public_defaults.sh`.
+
+### Unchanged
+- An explicit `--relay` / `--pin` (or a saved config / `relay.env`) always wins. `--relay` without
+  `--pin` behaves exactly as before; no pin is filled in for it. CA mode has no default relay, and other
+  `floo-powder` subcommands never use the public one.
+- README and `docs/THREAT-MODEL.md` pin `v0.8.0`; the README keeps one explicit `--relay … --pin …`
+  example for people running their own relay.
+
 ## 0.7.4 — 2026-10-29
 
 Relay installer hotfix. **If you installed or refreshed a relay with 0.7.3, re-run

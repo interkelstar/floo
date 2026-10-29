@@ -17,6 +17,7 @@ bash "$DIR/unit/dispatcher.sh" || rc=1
   bash "$DIR/unit/connect_meta.sh" || rc=1
   bash "$DIR/unit/watchdog.sh" || rc=1
   bash "$DIR/unit/pin_bootstrap.sh" || rc=1
+  bash "$DIR/unit/public_defaults.sh" || rc=1
   bash "$DIR/unit/route_bind_gate.sh" || rc=1
   bash "$DIR/unit/init_host.sh" || rc=1
   bash "$DIR/unit/hardening_misc.sh" || rc=1

@@ -10,6 +10,7 @@
 #   floo-powder invite                  print the client one-liner to hand off (uses the version tag)
 #   floo-powder list                    show client boxes with an open session
 #   floo-powder connect <code>          resolve the code -> the session, mint a 60-min cert, open a shell
+#                                          (no relay given or saved → the built-in public relay.floo.run, pin built in)
 #       [--confirm CODE]                   supply the code non-interactively (when already verified)
 #       [--no-shell]                       just establish the session (then use ssh/rsync/exec)
 #   floo-powder exec <handle>           run stdin on the box non-interactively (the bot/audit path)
@@ -19,7 +20,14 @@
 set -euo pipefail
 
 FLOO_HOME="${FLOO_HOME:-$HOME/.config/floo}"
-FLOO_VERSION="0.7.4"
+FLOO_VERSION="0.8.0"
+# The built-in public relay: `floo-powder connect CODE` with no --relay and no relay in
+# $FLOO_HOME/relay.env (or FLOO_RELAY_HOST) dials this relay and verifies its host key against this
+# pin (16-hex sha256 prefix of the relay's ed25519 host key, the same pin the client's `floo --public`
+# uses). Explicit --relay/--pin or a saved relay always win; other subcommands never use these.
+FLOO_PUBLIC_RELAY_HOST="${FLOO_PUBLIC_RELAY_HOST:-relay.floo.run}"
+FLOO_PUBLIC_RELAY_PORT="${FLOO_PUBLIC_RELAY_PORT:-443}"
+FLOO_PUBLIC_RELAY_PIN="${FLOO_PUBLIC_RELAY_PIN:-df2b83ff925f89bd}"
 # FLOO_POWDER_SELF_MARKER — `install` greps for this token to tell an on-disk copy of this script
 # (symlink it) from being run piped via `curl … | bash` (no file to link → self-fetch the pinned tag).
 FLOO_POWDER_URL="${FLOO_POWDER_URL:-https://raw.githubusercontent.com/interkelstar/floo/v$FLOO_VERSION/bin/floo-powder}"
@@ -365,6 +373,8 @@ verify_relay_pin() {
   # Update only the current-relay keys — a full overwrite here would silently wipe this box's own
   # SELF_RELAY_* identity (see the SELF_RELAY split above) whenever the operator points floo-powder
   # at someone else's relay (e.g. a client's), breaking `invite` afterward.
+  # The built-in public relay is never saved: it is a per-run default, not the operator's choice.
+  if [ "${USING_PUBLIC_RELAY:-0}" = 1 ]; then echo "${G}✓ public relay $RELAY_HOST pinned (not saved)${X}"; return 0; fi
   { grep -vE '^RELAY_(HOST|PORT)=' "$FLOO_HOME/relay.env" 2>/dev/null; echo "RELAY_HOST=$RELAY_HOST"; echo "RELAY_PORT=$RELAY_PORT"; } > "$FLOO_HOME/relay.env.tmp" && mv "$FLOO_HOME/relay.env.tmp" "$FLOO_HOME/relay.env"
   echo "${G}✓ relay $RELAY_HOST pinned and saved${X}"
 }
@@ -954,7 +964,17 @@ while [ $# -gt 0 ]; do case "$1" in
   --pin)   FLOO_RELAY_PIN="$2"; shift 2;;
   *) break;;
 esac; done
-[ -n "$FLOO_RELAY_PIN" ] && verify_relay_pin
+# connect with neither a relay (flags, env, relay.env) nor a --pin → the built-in public relay + its
+# pin, for this run only (not saved to relay.env, so `list`/`exec`/a later `connect` are unaffected).
+# Anything explicit — --relay alone, --pin alone, or both — is never second-guessed.
+USING_PUBLIC_RELAY=0
+if [ "${1:-}" = connect ] && [ -z "$RELAY_HOST" ] && [ -z "$FLOO_RELAY_PIN" ]; then
+  RELAY_HOST="$FLOO_PUBLIC_RELAY_HOST"; RELAY_PORT="$FLOO_PUBLIC_RELAY_PORT"
+  FLOO_RELAY_PIN="$FLOO_PUBLIC_RELAY_PIN"; USING_PUBLIC_RELAY=1
+  printf '%s•%s using the public relay %s:%s (pin %s is built into this floo-powder; --relay/--pin to use your own)\n' \
+    "$D" "$X" "$RELAY_HOST" "$RELAY_PORT" "$FLOO_RELAY_PIN" >&2
+fi
+if [ -n "$FLOO_RELAY_PIN" ]; then verify_relay_pin; fi
 
 # transparency: announce the running version (to stderr, so it never pollutes stdout/`exec` output or a
 # parsed `list`). Skipped where it would be noise/duplication: --version/-h/--help print it already, and

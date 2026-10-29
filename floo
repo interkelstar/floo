@@ -29,7 +29,7 @@
 set -uo pipefail
 umask 077   # everything we create (keys, config, recordings) is owner-only from birth
 
-FLOO_VERSION="0.7.4"
+FLOO_VERSION="0.8.0"
 
 # ─── The disclosure: the ONLY key that can enter. Public by design. ──────────────────────
 # This is a *public* key. Publishing it is safe and is the whole point: you read it and
@@ -50,6 +50,16 @@ FLOO_RELAY_USER="${FLOO_RELAY_USER:-gw}"       # a powerless, forwarding-only ac
 FLOO_RELAY_SOCK_DIR="${FLOO_RELAY_SOCK_DIR:-/run/floo}"   # path namespace ON the relay
 FLOO_RELAY_PIN="${FLOO_RELAY_PIN:-}"            # short relay-hostkey fingerprint (pin-bootstrap)
 FLOO_PUBLIC="${FLOO_PUBLIC:-0}"                 # --public: no-CA "quick" mode; the code IS the credential
+
+# ─── The built-in public relay (quick / --public mode only). ─────────────────────────────
+# `floo --public` with no --relay (and no saved config) dials this relay and verifies its host key
+# against this pin — so the shortest honest command needs no --relay/--pin. The pin is the 16-hex
+# sha256 prefix of the relay's ed25519 host key; there is intentionally NO CA half (quick mode uses
+# no operator CA). These bytes are the tag's bytes, so the default lives here, not in a URL.
+# Explicit --relay / --pin (or a saved config) always win; CA mode never uses these.
+FLOO_PUBLIC_RELAY_HOST="${FLOO_PUBLIC_RELAY_HOST:-relay.floo.run}"
+FLOO_PUBLIC_RELAY_PORT="${FLOO_PUBLIC_RELAY_PORT:-443}"
+FLOO_PUBLIC_RELAY_PIN="${FLOO_PUBLIC_RELAY_PIN:-df2b83ff925f89bd}"
 
 # ─── Cosmetic ────────────────────────────────────────────────────────────────────────────
 # shellcheck disable=SC2034  # full color palette declared; not every color is used everywhere
@@ -1014,6 +1024,7 @@ window) revokes it. Nothing is installed, nothing runs as root, nothing survives
 Usage:
   floo                      open a support session using a saved operator (see config below)
   floo --public             open a NO-CERT session (code-only; any operator with the code, no CA)
+                            via the built-in public relay $FLOO_PUBLIC_RELAY_HOST (pin built in)
   floo --relay H[:P] --operator-ca KEY [--relay-hostkey KEY] [--name N]
                             open a session with the operator passed inline (ad-hoc)
   floo --relay H[:P] --pin RELAY16[:CA16]
@@ -1120,6 +1131,19 @@ bootstrap_from_relay() {
   fi
 }
 
+# --public with NEITHER a relay NOR a pin from flags, env or a saved config → the built-in public
+# relay + its pin. Anything explicit is never second-guessed: --relay alone, --pin alone, or both,
+# behave exactly as before (a --pin with no relay is a mistake, not a request for the public relay
+# with a foreign pin). Never applies outside --public (CA mode has no default relay).
+apply_public_defaults() {
+  [ "$FLOO_PUBLIC" = 1 ] || return 0
+  [ -z "$FLOO_RELAY_HOST" ] && [ -z "$FLOO_RELAY_PIN" ] || return 0
+  FLOO_RELAY_HOST="$FLOO_PUBLIC_RELAY_HOST"
+  FLOO_RELAY_PORT="$FLOO_PUBLIC_RELAY_PORT"
+  FLOO_RELAY_PIN="$FLOO_PUBLIC_RELAY_PIN"
+  info "using the public relay $FLOO_RELAY_HOST:$FLOO_RELAY_PORT (pin $FLOO_RELAY_PIN is built into this floo; --relay/--pin to use your own)"
+}
+
 main() {
   case "${1:-}" in
     -h|--help) usage; exit 0;;
@@ -1148,6 +1172,7 @@ main() {
   NAME="$(resolve_name | tr -cd 'A-Za-z0-9._-' | cut -c1-63)"; [ -n "$NAME" ] || NAME="floohost"
   [ "$mode" = printname ] && { printf '%s\n' "$NAME"; exit 0; }
   if [ -z "$FLOO_RELAY_HOST" ] || [ -z "$FLOO_OPERATOR_CA" ]; then load_operator "$operator" || true; fi
+  case "$mode" in session|showop) apply_public_defaults;; esac
   if [ -n "$FLOO_RELAY_PIN" ] && [ -z "$FLOO_OPERATOR_CA" ] && [ -n "$FLOO_RELAY_HOST" ]; then bootstrap_from_relay; fi
   # paste-safety: a terminal can fold a long --operator-ca/--relay-hostkey onto multiple lines
   # (newline+indent), which corrupts the key. Collapse inserted whitespace back to "type blob comment".

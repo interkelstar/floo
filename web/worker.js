@@ -1,12 +1,13 @@
 // floo.run — the short entry point.
 //
-//   curl -fsSL floo.run | bash -s -- --public --relay floo.kelstar.me --pin <RELAY16>
+//   curl -sL floo.run/go | bash
 //
 // This Worker serves the bytes of ONE pinned release tag straight from GitHub; it never
 // serves `main`. The tag is a constant below and moves only with a deploy, so "what you
 // read on GitHub under that tag is what you run" holds for the short URL too.
 //
 //   /            -> floo            (the client, pinned tag)
+//   /go          -> bin/floo-go     (no-flags wrapper: fetches the tag's floo, runs --public)
 //   /powder      -> bin/floo-powder (the operator script, pinned tag)
 //   /vX.Y.Z      -> floo at that tag
 //   /vX.Y.Z/powder
@@ -14,13 +15,14 @@
 //
 // A browser (Accept: text/html) asking for / gets a one-screen landing page instead.
 
-const TAG = "v0.7.4";
+const TAG = "v0.8.0";
 const REPO = "interkelstar/floo";
 const FILES = {
   "": "floo",
   "floo": "floo",
   "powder": "bin/floo-powder",
   "floo-powder": "bin/floo-powder",
+  "go": "bin/floo-go", // `curl -sL floo.run/go | bash` — no flags; exists from v0.8.0
 };
 const TAG_RE = /^v\d+\.\d+\.\d+$/;
 
@@ -55,16 +57,18 @@ a{color:var(--acc)}
 nothing listens, nothing runs as root, and <strong>Ctrl-C</strong> ends it. Two bash files; read them before you run them.</p>
 
 <h2>They need help — they run this and read you the code it prints</h2>
-<pre><code>curl -fsSL floo.run | bash -s -- --public --relay floo.kelstar.me --pin df2b83ff925f89bd</code></pre>
+<pre><code>curl -sL floo.run/go | bash</code></pre>
 
 <h2>You're helping — paste this with their code</h2>
-<pre><code>bash &lt;(curl -fsSL floo.run/powder) --relay floo.kelstar.me --pin df2b83ff925f89bd connect THE-CODE</code></pre>
+<pre><code>bash &lt;(curl -sL floo.run/powder) connect THE-CODE</code></pre>
 
 <h2>Don't trust us — read us</h2>
 <p>This domain serves the bytes of release <a href="https://github.com/${REPO}/tree/${tag}"><code>${tag}</code></a>, never <code>main</code>;
-tags in the repository are immutable. <code>floo.run</code> is <a href="${raw}/floo">floo</a>, <code>floo.run/powder</code> is
+tags in the repository are immutable. <code>floo.run</code> is <a href="${raw}/floo">floo</a>, <code>floo.run/go</code> is a
+<a href="${raw}/bin/floo-go">20-line wrapper</a> that fetches that <code>floo</code> and starts it in quick mode (the public relay
+<code>relay.floo.run</code> and its host-key pin are constants inside <code>floo</code> itself), <code>floo.run/powder</code> is
 <a href="${raw}/bin/floo-powder">floo-powder</a>, <code>floo.run/version</code> says which tag. Download, read, then run:</p>
-<pre><code>curl -fsSL floo.run -o floo &amp;&amp; less floo &amp;&amp; bash floo --public --relay floo.kelstar.me --pin df2b83ff925f89bd</code></pre>
+<pre><code>curl -fsSL floo.run -o floo &amp;&amp; less floo &amp;&amp; bash floo --public</code></pre>
 <p class="mut">The public relay is a courtesy with no guarantees (quick sessions up to 30 minutes). For anything ongoing or sensitive,
 run your own relay in CA mode — see the <a href="https://github.com/${REPO}#readme">README</a>, <a href="https://github.com/${REPO}/blob/${tag}/docs/THREAT-MODEL.md">threat model</a>
 and <a href="https://github.com/${REPO}/blob/${tag}/docs/READING.md">reading map</a>. MIT.</p>
@@ -77,6 +81,11 @@ export default {
       return text("method not allowed\n", 405, { allow: "GET, HEAD" });
     }
     const url = new URL(request.url);
+    // scripts only over TLS: a plain-http `curl | bash` is an invitation to anyone on the path
+    if (url.protocol === "http:") {
+      url.protocol = "https:";
+      return Response.redirect(url.toString(), 301);
+    }
     const parts = url.pathname.split("/").filter(Boolean);
 
     let tag = TAG;
