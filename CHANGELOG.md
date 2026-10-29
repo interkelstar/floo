@@ -1,4 +1,27 @@
 # Changelog
+## 0.7.4 — 2026-10-29
+
+Relay installer hotfix. **If you installed or refreshed a relay with 0.7.3, re-run
+`floo-powder relay-install` from 0.7.4.**
+
+### Fixed
+- **0.7.3's `install-relay.sh` is broken on hosts where `route` exists.** The `sshd_config` heredoc is
+  unquoted (so `$PORT` and friends expand), and a new comment contained a literal backtick-quoted
+  `route`. On boxes with net-tools installed that ran route(8) and pasted the kernel routing table into
+  `relay_sshd_config`, so `sshd -t` failed. The comment no longer contains backticks and carries a
+  warning not to add any.
+- **The installer carried on after a failed `sshd -t`.** It now prints the failure and exits 1 before
+  touching systemd, so a bad config can no longer reach a (re)start.
+- **Refreshing a running relay did not pick up the new config.** `systemctl enable --now` is a no-op for
+  an active unit, so the already-listening sshd kept its old config. With 0.7.3's route gate (which
+  needs `ExposeAuthInfo yes`) that left every quick session denied after a refresh from 0.7.3, until
+  sshd was HUPed or restarted. A running relay now gets SIGHUP
+  (`systemctl kill -s HUP --kill-whom=main`), so sshd re-execs with the new config while live sessions
+  keep running.
+
+### Changed
+- README and `docs/THREAT-MODEL.md` pin `v0.7.4`.
+
 ## 0.7.3 — 2026-10-29
 
 Security hardening from a two-scanner audit. Fixes landed on `main` on 2026-09-09; this tag makes

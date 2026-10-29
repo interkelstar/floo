@@ -196,12 +196,19 @@ Match User gw
     PermitTTY no
     # Exposes the key that actually authenticated THIS connection to floo-route via the
     # SSH_USER_AUTH env var (a "publickey <base64-blob>" line per method used) — the dispatcher's
-    # `route` uses it to confirm a quick-mode caller is the operator who completed bindop for that
-    # sid, instead of trusting whatever key text an attacker's argv claims to be.
+    # route verb uses it to confirm a quick-mode caller is the operator who completed bindop for
+    # that sid, instead of trusting whatever key text an attacker's argv claims to be.
+    # (This heredoc is UNQUOTED so \$PORT etc. expand — never put backticks in these comments:
+    # 2026-10-29 a literal \`route\` here ran net-tools' route(8) and pasted the kernel routing
+    # table into sshd_config on boxes that have it.)
     ExposeAuthInfo yes
     ForceCommand /usr/local/bin/floo-route
 CFG
-"$SSHD_BIN" -t -f "$ETC/relay_sshd_config" && echo "   sshd config OK"
+# A config that does not pass sshd -t must never reach systemd: enabling/HUPing sshd on it would
+# either refuse to start (fresh install) or keep the OLD config silently (refresh), while the new
+# floo-route already assumes the new directives (ExposeAuthInfo) — quick sessions would all be denied.
+"$SSHD_BIN" -t -f "$ETC/relay_sshd_config" || { echo "!! $ETC/relay_sshd_config failed sshd -t — fix the config; relay NOT (re)started" >&2; exit 1; }
+echo "   sshd config OK"
 
 # SELinux: under systemd the relay runs in the confined sshd_t domain, which may bind only the
 # ssh port (22). Our port (443 = http_port_t by default) is refused with EACCES until we label it
@@ -243,7 +250,17 @@ RestartSec=3
 WantedBy=multi-user.target
 UNIT
 systemctl daemon-reload
-systemctl enable --now floo-relay.service
+if systemctl is-active --quiet floo-relay.service; then
+  # Refresh of a running relay: `enable --now` is a no-op for an active unit, so the sshd that is
+  # listening would keep the OLD config (found 2026-10-29 — the route gate shipped in 0.7.3 needs
+  # ExposeAuthInfo, and a refreshed relay never picked it up). SIGHUP makes sshd re-exec with the
+  # new config while live sessions (separate child processes) keep running.
+  systemctl enable floo-relay.service >/dev/null 2>&1 || true   # running but never enabled → still survive a reboot
+  systemctl kill -s HUP --kill-whom=main floo-relay.service
+  echo "   relay was running — sent SIGHUP so sshd re-read $ETC/relay_sshd_config (live sessions kept)"
+else
+  systemctl enable --now floo-relay.service
+fi
 
 echo "==> opening $PORT/tcp"
 open_port "$PORT"
