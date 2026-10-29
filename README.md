@@ -15,13 +15,13 @@ with that code and they're in — the session is recorded to the helped box's di
 **🆘 You need help** — run this, then read the helper the code it shows:
 
 ```sh
-curl -sL floo.run/go | bash
+curl -s https://floo.run/go | bash
 ```
 
 **🧑‍🔧 You're helping** — paste this with the code they read you (opens a shell on their box):
 
 ```sh
-bash <(curl -sL floo.run/powder) connect THE-CODE-THEY-READ
+bash <(curl -s https://floo.run/powder) connect THE-CODE-THEY-READ
 ```
 
 `floo.run` serves the bytes of the pinned tag (v0.8.0), never `main` (the Worker behind it is in
@@ -38,7 +38,7 @@ you mean to let in, and close the window when you're done. The public relay's ho
 (`df2b83ff925f89bd`) is a constant in both scripts (`FLOO_PUBLIC_RELAY_PIN`), so `floo` knows it's
 reaching the real relay, not a MITM, and both print one line saying which relay they use. Running your
 own relay? Pass it explicitly — `--relay` / `--pin` always win:
-`curl -fsSL floo.run | bash -s -- --public --relay relay.example.com --pin 0123456789abcdef`.
+`curl -fsSL https://floo.run | bash -s -- --public --relay relay.example.com --pin 0123456789abcdef`.
 For ongoing or sensitive access, self-host a
 relay and use CA mode — see [For the operator](#for-the-operator). *(The helper line uses `bash`/`zsh`;
 on another shell: `curl … -o floo-powder && bash floo-powder … connect …`.)*

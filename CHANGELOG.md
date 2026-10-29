@@ -2,7 +2,7 @@
 ## 0.8.0 — 2026-10-29
 
 Built-in public relay defaults: the shortest honest commands are now
-`curl -sL floo.run/go | bash` and `bash <(curl -sL floo.run/powder) connect CODE`.
+`curl -s https://floo.run/go | bash` and `bash <(curl -s https://floo.run/powder) connect CODE`.
 
 ### Added
 - **`bin/floo-go`** — the no-flags entry served at `floo.run/go`: 20 readable lines that fetch this tag's

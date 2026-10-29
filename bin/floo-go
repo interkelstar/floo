@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # floo-go — the no-flags entry for the person who needs help:
 #
-#     curl -sL floo.run/go | bash
+#     curl -s https://floo.run/go | bash
 #
 # Fetches the floo client of ONE pinned release tag (never `main`) and starts it in quick
 # (--public) mode. The public relay and its host-key pin are built into that client, so nothing
@@ -9,7 +9,7 @@
 #
 # This file is the only thing you run blind. Read the client it fetches before trusting it:
 #     https://github.com/interkelstar/floo/blob/v0.8.0/floo
-# or do it by hand:  curl -fsSL floo.run -o floo && less floo && bash floo --public
+# or do it by hand:  curl -fsSL https://floo.run -o floo && less floo && bash floo --public
 set -eu
 TAG="${FLOO_GO_TAG:-v0.8.0}"
 URL="https://raw.githubusercontent.com/interkelstar/floo/$TAG/floo"

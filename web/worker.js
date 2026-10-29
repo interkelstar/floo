@@ -1,6 +1,6 @@
 // floo.run — the short entry point.
 //
-//   curl -sL floo.run/go | bash
+//   curl -s https://floo.run/go | bash
 //
 // This Worker serves the bytes of ONE pinned release tag straight from GitHub; it never
 // serves `main`. The tag is a constant below and moves only with a deploy, so "what you
@@ -22,7 +22,7 @@ const FILES = {
   "floo": "floo",
   "powder": "bin/floo-powder",
   "floo-powder": "bin/floo-powder",
-  "go": "bin/floo-go", // `curl -sL floo.run/go | bash` — no flags; exists from v0.8.0
+  "go": "bin/floo-go", // `curl -s https://floo.run/go | bash` — no flags; exists from v0.8.0
 };
 const TAG_RE = /^v\d+\.\d+\.\d+$/;
 
@@ -57,10 +57,10 @@ a{color:var(--acc)}
 nothing listens, nothing runs as root, and <strong>Ctrl-C</strong> ends it. Two bash files; read them before you run them.</p>
 
 <h2>They need help — they run this and read you the code it prints</h2>
-<pre><code>curl -sL floo.run/go | bash</code></pre>
+<pre><code>curl -s https://floo.run/go | bash</code></pre>
 
 <h2>You're helping — paste this with their code</h2>
-<pre><code>bash &lt;(curl -sL floo.run/powder) connect THE-CODE</code></pre>
+<pre><code>bash &lt;(curl -s https://floo.run/powder) connect THE-CODE</code></pre>
 
 <h2>Don't trust us — read us</h2>
 <p>This domain serves the bytes of release <a href="https://github.com/${REPO}/tree/${tag}"><code>${tag}</code></a>, never <code>main</code>;
@@ -68,7 +68,7 @@ tags in the repository are immutable. <code>floo.run</code> is <a href="${raw}/f
 <a href="${raw}/bin/floo-go">20-line wrapper</a> that fetches that <code>floo</code> and starts it in quick mode (the public relay
 <code>relay.floo.run</code> and its host-key pin are constants inside <code>floo</code> itself), <code>floo.run/powder</code> is
 <a href="${raw}/bin/floo-powder">floo-powder</a>, <code>floo.run/version</code> says which tag. Download, read, then run:</p>
-<pre><code>curl -fsSL floo.run -o floo &amp;&amp; less floo &amp;&amp; bash floo --public</code></pre>
+<pre><code>curl -fsSL https://floo.run -o floo &amp;&amp; less floo &amp;&amp; bash floo --public</code></pre>
 <p class="mut">The public relay is a courtesy with no guarantees (quick sessions up to 30 minutes). For anything ongoing or sensitive,
 run your own relay in CA mode — see the <a href="https://github.com/${REPO}#readme">README</a>, <a href="https://github.com/${REPO}/blob/${tag}/docs/THREAT-MODEL.md">threat model</a>
 and <a href="https://github.com/${REPO}/blob/${tag}/docs/READING.md">reading map</a>. MIT.</p>
@@ -100,7 +100,12 @@ export default {
       return new Response(landing(tag), {
         status: 200,
         // never let a shared cache hand this HTML to a `curl | bash` under the same URL
-        headers: { "content-type": "text/html; charset=utf-8", "cache-control": "no-store", "vary": "Accept" },
+        headers: {
+          "content-type": "text/html; charset=utf-8",
+          "cache-control": "no-store",
+          "vary": "Accept",
+          "strict-transport-security": "max-age=31536000; includeSubDomains",
+        },
       });
     }
 
@@ -118,6 +123,7 @@ export default {
           "content-type": "text/plain; charset=utf-8",
           "cache-control": "public, max-age=3600",
           "vary": "Accept",
+          "strict-transport-security": "max-age=31536000; includeSubDomains",
           "x-floo-tag": tag,
           "x-floo-source": upstream,
         },
