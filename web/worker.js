@@ -90,7 +90,8 @@ export default {
     if (key === "" && accept.includes("text/html")) {
       return new Response(landing(tag), {
         status: 200,
-        headers: { "content-type": "text/html; charset=utf-8", "cache-control": "public, max-age=600" },
+        // never let a shared cache hand this HTML to a `curl | bash` under the same URL
+        headers: { "content-type": "text/html; charset=utf-8", "cache-control": "no-store", "vary": "Accept" },
       });
     }
 
@@ -107,6 +108,7 @@ export default {
         headers: {
           "content-type": "text/plain; charset=utf-8",
           "cache-control": "public, max-age=3600",
+          "vary": "Accept",
           "x-floo-tag": tag,
           "x-floo-source": upstream,
         },
