@@ -38,7 +38,9 @@ export PATH="$STUBDIR:$PATH"
 run_bootstrap() {   # $1 = FLOO_RELAY_PIN value
   ( set -uo pipefail
     FLOO_NO_MAIN=1 source "$REPO/floo" >/dev/null 2>&1
+    # shellcheck disable=SC2034  # read by bootstrap_from_relay (sourced above), not by this script
     FLOO_RELAY_HOST=relay.test FLOO_RELAY_PORT=443 FLOO_RELAY_USER=gw FLOO_PUBLIC=0
+    # shellcheck disable=SC2034  # same: consumed by bootstrap_from_relay
     FLOO_RELAY_PIN="$1"
     bootstrap_from_relay
     rc=$?

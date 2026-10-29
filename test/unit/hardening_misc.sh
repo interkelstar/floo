@@ -45,6 +45,7 @@ grep -q 'macopt "hexkey:' "$FLOO" && ok "HMAC key is passed via -macopt hexkey:"
 # functional: hmac_code(key, stdin-message) matches the old openssl -hmac construction. Sourcing
 # floo overwrites this script's own ok()/bad() (floo defines its own), so do it in a subshell and
 # only bring the digest back out.
+# shellcheck disable=SC1090  # $FLOO is the client script under test, located at runtime
 got="$(FLOO_NO_MAIN=1 source "$FLOO" >/dev/null 2>&1; printf 'somemessage' | hmac_code 'AB12-CD34')"
 want="$(printf 'somemessage' | openssl dgst -sha256 -hmac 'AB12-CD34' | awk '{print $NF}')"
 [ "$got" = "$want" ] && ok "hmac_code() produces the same digest as a plain HMAC" || bad "hmac_code() mismatch: got=$got want=$want"

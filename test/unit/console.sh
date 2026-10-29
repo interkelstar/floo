@@ -39,6 +39,7 @@ grep -q 'your helper is connected' <<<"$out" && ok "monitor announces a connecte
 echo "=== render_console falls through to monitor() when python3 is ABSENT (minimal/container boxes) ==="
 out="$(
   W="$(mktemp -d)"; mkdir -p "$W/active" "$W/recording"
+  # shellcheck disable=SC2034  # read by the sourced floo functions (render_console/monitor), not here
   WORKDIR="$W" G="" X="" D=""
   command() { if [ "${1:-}" = -v ] && [ "${2:-}" = python3 ]; then return 1; fi; builtin command "$@"; }
   sleep 30 & SSHD_PID=$!; sleep 30 & TUNNEL_PID=$!
