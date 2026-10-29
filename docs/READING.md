@@ -13,9 +13,9 @@ refactors, line numbers don't.
 
 | File | Lines | What it is |
 |------|-------|------------|
-| `floo` | ~1100 | The client — the thing a stranger runs on their box. Read this first: it's the trust-critical file. |
-| `bin/floo-powder` | ~860 | The operator CLI. Roughly the **second half is the embedded relay payload** (see below), so the "real" CLI is ~330 lines. |
-| `relay/floo-route` + `relay/floo-authkeys` | ~230 | The relay-side dispatcher + auth hook — canonical source of the embedded payload. |
+| `floo` | ~1200 | The client — the thing a stranger runs on their box. Read this first: it's the trust-critical file. |
+| `bin/floo-powder` | ~1010 | The operator CLI. Roughly the **second part (~630 lines) is the embedded relay payload** (see below), so the "real" CLI is ~380 lines. |
+| `relay/floo-route` + `relay/floo-authkeys` | ~270 | The relay-side dispatcher + auth hook — canonical source of the embedded payload. |
 
 Supporting cast: `scripts/embed.sh` (regenerates the payload; `--check` fails on
 drift), `relay/install-relay.sh` (relay box bootstrap), `test/` (unit suites +
@@ -44,7 +44,7 @@ Read it top to bottom; the banners are the outline:
 
 ## Pass 2 — the operator CLI (`bin/floo-powder`), ~5 minutes
 
-The first ~330 lines are seven small sections (relay plumbing → operator CA →
+The first ~380 lines are seven small sections (relay plumbing → operator CA →
 session commands → invites → relay lifecycle → foreign-relay pin verification).
 Skim them; the security-relevant bits are the CA section and the `--pin`
 verification.
@@ -55,7 +55,7 @@ Then you hit:
 # ── BEGIN EMBEDDED RELAY PAYLOAD ──
 ```
 
-Roughly the second half of the file is code-as-string-literals **on purpose**:
+The rest of the file (~630 lines) is code-as-string-literals **on purpose**:
 `less floo-powder` must show the exact bytes that will run as root on the
 relay. Don't audit the heredocs directly — audit `relay/` (same content,
 syntax-highlighted, unit-tested) and trust the drift check:
@@ -68,7 +68,7 @@ scripts/embed.sh --check   # CI and test/run-all.sh fail if they ever diverge
 
 - `floo-route` — the forced command for every connection to the relay's `gw`
   user. Sessions register here; operators list/connect through here. It is the
-  entire relay attack surface: ~200 lines.
+  entire relay attack surface: ~240 lines.
 - `floo-authkeys` — the `AuthorizedKeysCommand` hook: decides which keys may
   talk to `floo-route` at all. 29 lines.
 - `install-relay.sh` — systemd + sshd_config the relay runs under. Check the

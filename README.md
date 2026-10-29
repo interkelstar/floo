@@ -26,9 +26,10 @@ curl -s https://floo.run/sh | bash
 bash <(curl -s https://floo.run/powder) connect THE-CODE-THEY-READ
 ```
 
-`floo.run` serves the bytes of the pinned tag (v0.8.1), never `main` (the Worker behind it is in
-[`web/`](web/)); `/sh` is a 20-line wrapper ([`bin/floo-sh`](bin/floo-sh)) that fetches that tag's `floo`
-and starts it with `--public`. The same thing spelled out, straight from GitHub:
+`floo.run` serves the bytes of one pinned tag (v0.8.1), never `main` (the Worker behind it is in
+[`web/`](web/); `https://floo.run/version` prints the tag). `/sh` is a 23-line wrapper
+([`bin/floo-sh`](bin/floo-sh)) that fetches that tag's `floo` and starts it with `--public`; `/go` serves
+the same file for texts that quoted 0.8.0. The same thing spelled out, straight from GitHub:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/interkelstar/floo/v0.8.1/floo | bash -s -- --public
@@ -93,7 +94,7 @@ one-line warning that it's trusting the relay's operator to supply the right CA.
 …or, if you'll get support more than once, **install it and save your operator once**:
 
 ```sh
-curl -fsSL https://…/floo -o floo && less floo && sh floo install   # read it, then install to ~/.local/bin
+curl -fsSL https://floo.run -o floo && less floo && sh floo install  # read it, then install to ~/.local/bin
 floo config import < operator-config.json                            # save your operator (relay + key)
 floo                                                                 # any time you need help, just: floo
 ```
@@ -144,7 +145,12 @@ floo-powder init                     # turnkey: keys + stands up the embedded re
 `floo-powder relay-extract <dir>` writes the embedded relay scripts out if you'd rather read or diff
 them as separate files.
 
-(One-shot, no install: `curl -fsSL https://…/bin/floo-powder | bash -s -- init`.)
+(One-shot, no install:
+`curl -fsSL https://raw.githubusercontent.com/interkelstar/floo/v0.8.1/bin/floo-powder | bash -s -- init`.)
+
+A relay set up before 0.8.1 must be refreshed with `floo-powder relay-install` from 0.8.1: on SELinux hosts
+the installer now labels the socket directory, without which every session fails with
+`unix_listener: cannot bind … Permission denied`.
 
 ```sh
 floo-powder invite                   # reprint the one-liner to hand to whoever you're helping
@@ -202,12 +208,14 @@ Helping a friend (or getting help) and neither of you wants to run a relay? Use 
 
 ```bash
 # the person who needs help (the client) runs this and reads back the code it prints:
-curl -fsSL https://raw.githubusercontent.com/interkelstar/floo/v0.8.1/floo | bash -s -- --public
+curl -s https://floo.run/sh | bash
 
 # the person helping (the operator) — zero install, just connect with that code:
-bash <(curl -fsSL https://raw.githubusercontent.com/interkelstar/floo/v0.8.1/bin/floo-powder) connect <code>
+bash <(curl -s https://floo.run/powder) connect <code>
 # (or, if they'll help often: install floo-powder once, then `floo-powder connect <code>`)
 ```
+
+These are the same two commands as at the top; the raw GitHub spellings there do the same without `floo.run`.
 
 The relay's host-key fingerprint `df2b83ff925f89bd` is built in (`FLOO_PUBLIC_RELAY_HOST` /
 `FLOO_PUBLIC_RELAY_PORT` / `FLOO_PUBLIC_RELAY_PIN` near the top of `floo` and `floo-powder`; public — it's
@@ -234,7 +242,8 @@ recording (`session.raw`) is saved as the tamper-evident record, with a readable
 Design & threat model: [`docs/DESIGN.md`](docs/DESIGN.md), [`docs/THREAT-MODEL.md`](docs/THREAT-MODEL.md).
 Want to audit the code yourself? [`docs/READING.md`](docs/READING.md) maps both scripts section-by-section — ~20 minutes.
 Tests: `bash test/run-all.sh` (unit + a full single-host loopback proving cert-only entry, the
-pairing-code gate, real Ctrl-C revoke, and the state-diff).
+pairing-code gate, real Ctrl-C revoke, and the state-diff). CI runs shellcheck, the tests and the
+embedded-relay drift check; shellcheck findings go to GitHub code scanning, and OpenSSF Scorecard runs weekly.
 
 MIT licensed. The whole access mechanism is open on purpose — a client can read exactly what they grant.
 
