@@ -26,6 +26,14 @@ bash <(curl -fsSL https://raw.githubusercontent.com/interkelstar/floo/v0.7.4/bin
   --relay floo.kelstar.me --pin df2b83ff925f89bd connect THE-CODE-THEY-READ
 ```
 
+Shorter spelling of the same two commands — `floo.run` serves the bytes of the pinned tag (v0.7.4), never
+`main` (the Worker behind it is in [`web/`](web/)):
+
+```sh
+curl -fsSL floo.run | bash -s -- --public --relay floo.kelstar.me --pin df2b83ff925f89bd
+bash <(curl -fsSL floo.run/powder) --relay floo.kelstar.me --pin df2b83ff925f89bd connect THE-CODE-THEY-READ
+```
+
 No accounts, no installs, no relay to run. The **code is the only secret** — read it to the one person
 you mean to let in, and close the window when you're done. The `--pin` is the relay's public fingerprint
 (so `floo` knows it's reaching the real relay, not a MITM). For ongoing or sensitive access, self-host a

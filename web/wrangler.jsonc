@@ -1,0 +1,12 @@
+// Cloudflare Worker behind floo.run (see worker.js). Deploy:
+//   npx wrangler deploy -c web/wrangler.jsonc
+// Bump TAG in worker.js and redeploy after every release.
+{
+  "$schema": "https://unpkg.com/wrangler/config-schema.json",
+  "name": "floo-run",
+  "main": "worker.js",
+  "compatibility_date": "2026-06-01",
+  "account_id": "2e6935cf16bb3d0a472d4531d308d475",
+  "routes": [{ "pattern": "floo.run/*", "zone_name": "floo.run" }],
+  "observability": { "enabled": true }
+}
