@@ -31,13 +31,13 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       # ShellCheck itself has no SARIF output (0.11.0: checkstyle, diff, gcc, json, json1, quiet, tty);
-      # shellcheck-sarif converts its json1 output.
+      # shellcheck-sarif converts its `-f json` output (an array; `json1` wraps it in an object).
       - name: install shellcheck-sarif
         run: cargo install shellcheck-sarif --version 0.8.0 --locked
       - name: shellcheck (warning level) as SARIF
         run: |
-          shellcheck -S warning -f json1 \
-            floo bin/floo-powder bin/floo-go \
+          shellcheck -S warning -f json \
+            floo bin/floo-* \
             relay/floo-route relay/floo-authkeys relay/install-relay.sh \
             test/run-all.sh > shellcheck.json || true
           shellcheck-sarif < shellcheck.json > shellcheck.sarif
