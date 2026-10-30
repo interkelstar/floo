@@ -14,7 +14,7 @@ jobs:
     name: shellcheck
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: shellcheck (warning level)
         run: |
           shellcheck --version
@@ -32,7 +32,7 @@ jobs:
       security-events: write
       contents: read
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       # ShellCheck itself has no SARIF output (0.11.0: checkstyle, diff, gcc, json, json1, quiet, tty);
       # shellcheck-sarif converts its `-f json` output (an array; `json1` wraps it in an object).
       - name: install shellcheck-sarif
@@ -45,7 +45,7 @@ jobs:
             test/run-all.sh > shellcheck.json || true
           shellcheck-sarif < shellcheck.json > shellcheck.sarif
       - name: upload to code scanning
-        uses: github/codeql-action/upload-sarif@4bfa242aa49c5f7c6770b98670d354a7dfac05f8 # v3
+        uses: github/codeql-action/upload-sarif@9b3254085494b55a0f7c4c2b3d2d52cc712ce370 # v4.39.1
         with:
           sarif_file: shellcheck.sarif
           category: shellcheck
@@ -54,7 +54,7 @@ jobs:
     name: full suite (unit + CA loopbacks + quick loopback)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: install test dependencies
         run: |
           sudo apt-get update -q
