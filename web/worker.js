@@ -15,7 +15,7 @@
 //
 // A browser (Accept: text/html) asking for / gets a one-screen landing page instead.
 
-const TAG = "v0.8.1";
+const TAG = "v0.8.2";
 const REPO = "interkelstar/floo";
 const FILES = {
   "": "floo",

@@ -20,7 +20,7 @@
 set -euo pipefail
 
 FLOO_HOME="${FLOO_HOME:-$HOME/.config/floo}"
-FLOO_VERSION="0.8.1"
+FLOO_VERSION="0.8.2"
 # The built-in public relay: `floo-powder connect CODE` with no --relay and no relay in
 # $FLOO_HOME/relay.env (or FLOO_RELAY_HOST) dials this relay and verifies its host key against this
 # pin (16-hex sha256 prefix of the relay's ed25519 host key, the same pin the client's `floo --public`

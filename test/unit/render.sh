@@ -194,5 +194,57 @@ for _ in 1 2 3; do printf 'x\n' | FLOO_MARK_NONCE="$N" "$FLOO" --render >/dev/nu
 after=$(ls "${TMPDIR:-/tmp}"/floo-render.* 2>/dev/null | wc -l)
 [ "$after" -le "$before" ] && ok "--render leaves no temp renderer files behind" || bad "leaked $((after-before)) temp files"
 
+echo "=== renderer: util-linux script(1) header/footer are not rendered (0.8.2) ==="
+out="$(render 'Script started on 2026-10-30 13:17:05+00:00 [COMMAND="/bin/bash --rcfile /x/hook.bash -i " TERM="x"]\n$ hostname\nbox\n\nScript done on 2026-10-30 13:17:15+00:00 [COMMAND_EXIT_CODE="0"]\n')"
+grep -q 'Script started' <<<"$out" && bad "script(1) header leaked into the rendered view" || ok "script(1) 'Script started' header is dropped"
+grep -q 'Script done' <<<"$out" && bad "script(1) footer leaked into the rendered view" || ok "script(1) 'Script done' footer is dropped"
+grep -qx 'box' <<<"$out" && ok "real output around the headers is kept" || bad "output lost around headers: [$out]"
+
+echo "=== renderer: the user's Ctrl-C never paints a traceback (0.8.2) ==="
+# The renderer sits in the user's foreground process group, so Ctrl-C reaches it mid-read. Mimic that:
+# its own process group (job control on), the renderer blocked on a slow stdin, INT to the whole group.
+tmp="$(mktemp "${TMPDIR:-/tmp}/floo-sigint.XXXXXX")"
+# Job control ON (set -m) so the background pipeline gets its own process group AND keeps SIGINT at
+# its default disposition, as under a real terminal. (A plain `&` without job control makes bash
+# ignore INT for the child — inherited by python3 — and the test would pass vacuously, even on
+# the 0.8.1 code that painted the traceback live.) Scoped in a subshell; the verdict comes out as text.
+# Two vacuity guards: the renderer must be SEEN running, and the launched floo must NOT have INT
+# already ignored on entry (bash cannot un-ignore an inherited ignore; nohup/CI wrappers do that) —
+# read from /proc/<pid>/status SigIgn, bit 2 = SIGINT.
+verdict="$(
+  set -m
+  sleep 3 | FLOO_MARK_NONCE="$N" "$FLOO" --render >"$tmp" 2>&1 &
+  jpid=$!
+  set +m
+  pgid=""; py=""
+  for _ in $(seq 1 25); do
+    sleep 0.1
+    pgid="$(ps -o pgid= -p "$jpid" 2>/dev/null | tr -d ' ')"
+    [ -n "$pgid" ] && py="$(pgrep -g "$pgid" -x python3 2>/dev/null | head -1)"
+    [ -n "$py" ] && break
+  done
+  sigign="$(awk '/^SigIgn:/{print $2}' "/proc/$jpid/status" 2>/dev/null)"
+  if [ -n "$sigign" ] && (( 0x$sigign & 2 )); then echo VACUOUS-INHERITED-IGN; kill -- -"$pgid" 2>/dev/null; wait "$jpid" 2>/dev/null; exit 0; fi
+  sleep 0.3   # past the renderer's own startup, so we test steady state, not the import race
+  [ -n "$pgid" ] && kill -INT -- -"$pgid" 2>/dev/null
+  wait "$jpid" 2>/dev/null
+  if [ -z "$py" ]; then echo VACUOUS
+  elif grep -q 'Traceback\|KeyboardInterrupt' "$tmp"; then echo TRACEBACK
+  else echo OK; fi
+)"
+case "$verdict" in
+  OK) ok "SIGINT to the group: renderer stays quiet, no traceback" ;;
+  TRACEBACK) bad "SIGINT painted a traceback: $(head -c 300 "$tmp")" ;;
+  VACUOUS-INHERITED-IGN) bad "SIGINT test is vacuous here: this shell inherited INT ignored (nohup/CI wrapper) — run it from a normal shell" ;;
+  *) bad "SIGINT test never saw the renderer running (vacuous)" ;;
+esac
+rm -f "$tmp"
+
+echo "=== recorder: script(1) runs with -f so the live pane streams, not buffers (0.8.2) ==="
+# Static lock: without --flush util-linux `script` buffers session.raw and the live pane shows the
+# helper's commands only at disconnect (every Debian/Ubuntu box in 0.8.1). The live proof is a
+# session on a box WITH script(1); this keeps the flag from being dropped by accident.
+grep -q 'script -q -f -a "\$log"' "$FLOO" && ok "script(1) is invoked with -f (flush)" || bad "script(1) call lacks -f: live pane would buffer until disconnect"
+
 echo; echo "=== $P passed, $F failed ==="
 [ "$F" -eq 0 ]

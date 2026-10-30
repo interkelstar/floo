@@ -1,4 +1,31 @@
 # Changelog
+## 0.8.2 — 2026-10-30
+
+Live-console fixes found by running the published commands on a Debian box (the dev box is Fedora
+without util-linux `script`, so none of these showed there).
+
+### Fixed
+- **The live command log did not stream on Debian/Ubuntu.** The recorder ran util-linux `script`
+  without `-f`, so the typescript was buffered and the person's window showed the helper's commands
+  only when the helper disconnected. `script` now runs with `-f` (flush after every write); boxes
+  without `script` were unaffected (they use the embedded pty relay, which streams).
+- **Ctrl-C painted a Python traceback over the person's window.** The live renderer sits in the
+  terminal's foreground process group and did not ignore SIGINT, so the one key the person is told
+  to press ended with `KeyboardInterrupt` on screen. The renderer now ignores INT/QUIT (teardown
+  closes its input) — same pattern the embedded pty relay already used.
+- `script`'s own `Script started on …` / `Script done on …` header and footer no longer appear in
+  the live view or `session.log` (the header spelled out the hook path). `session.raw` keeps every byte.
+
+### Added
+- `AGENTS.md`: how an AI agent connects as the helper (`--no-shell`, then `ssh <handle>`), with the
+  constraints a fresh agent gets wrong. README links it.
+- Regression tests for all three fixes (`test/unit/render.sh`); the Ctrl-C one runs the renderer in
+  its own process group with job control on, so it goes red on 0.8.1.
+
+### Changed
+- `floo.run/go` is gone; `/sh` is the only short name. README, `docs/THREAT-MODEL.md` and the Worker
+  pin `v0.8.2`; README's `demo.gif` re-recorded against this release (box: Debian 12; helper: Fedora).
+
 ## 0.8.1 — 2026-10-30
 
 ### Fixed

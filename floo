@@ -29,7 +29,7 @@
 set -uo pipefail
 umask 077   # everything we create (keys, config, recordings) is owner-only from birth
 
-FLOO_VERSION="0.8.1"
+FLOO_VERSION="0.8.2"
 
 # ─── The disclosure: the ONLY key that can enter. Public by design. ──────────────────────
 # This is a *public* key. Publishing it is safe and is the whole point: you read it and
@@ -272,7 +272,11 @@ else
   set -- "$ushell" -l
 fi
 if command -v script >/dev/null 2>&1; then
-  script -q -a "$log" -c "$(printf '%q ' "$@")"      # keystroke-recorded where util-linux `script` exists
+  # -f: flush after every write. Without it util-linux `script` buffers the typescript, so the live
+  # pane (tail -F session.raw -> render.py) showed the helper's commands only when they DISCONNECTED,
+  # on every box that has `script` (Debian/Ubuntu — 0.8.1). Boxes without it take relay.py below,
+  # which streams, so the bug never showed on the Fedora dev box.
+  script -q -f -a "$log" -c "$(printf '%q ' "$@")"   # keystroke-recorded where util-linux `script` exists
 else
   # IMPORTANT: write the relay to a file and run it. `python3 - <<'PY'` would make the heredoc
   # Python's STDIN, so the relay could not read the operator's keystrokes (instant EOF → it broke,
@@ -551,7 +555,12 @@ render_console() {
   trap 'pkill -P "$rpid" 2>/dev/null; kill "$rpid" 2>/dev/null; _con_teardown; exit 0' INT TERM HUP
   printf '\033[?25l'; _con_setup
   # tail a FIXED name (`tail -F` retries it until the recorder creates it on the first connect).
-  ( tail -n +1 -F "$dir/recording/session.raw" 2>/dev/null | FLOO_MARK_NONCE="$nonce" render_stream ) &
+  # The pane's tail+renderer sit in the terminal's foreground group, so the user's Ctrl-C reaches
+  # them. The renderer side ignores INT/QUIT (set before python3 starts, so it inherits the ignore
+  # from its first instruction — render.py's own SIG_IGN alone left a tiny import-time window that
+  # painted a KeyboardInterrupt). `tail` keeps the default: Ctrl-C ends it, python3 reads EOF and
+  # exits, so teardown never depends on `pkill` being installed. Ctrl-C itself is handled by the traps.
+  ( tail -n +1 -F "$dir/recording/session.raw" 2>/dev/null | { trap '' INT QUIT; FLOO_MARK_NONCE="$nonce" render_stream; } ) &
   rpid=$!
   seen="$( [ -f "$dir/sessions.log" ] && wc -l < "$dir/sessions.log" || echo 0 )"
   last_status="$(_con_line waiting)"; _con_status "$last_status"
@@ -581,6 +590,15 @@ write_render_py() {
   if [ -n "${WORKDIR:-}" ] && [ -d "$WORKDIR" ]; then RENDER_PY="$WORKDIR/render.py"
   else RENDER_PY="$(mktemp "${TMPDIR:-/tmp}/floo-render.XXXXXX")" || return 1; fi
   cat > "$RENDER_PY" <<'PY'
+import signal
+# First thing, before the other imports: this renderer sits in the user's foreground process group,
+# so their Ctrl-C reaches it too. Ctrl-C belongs to floo's teardown trap, not to a passive renderer:
+# ignore INT/QUIT and end on EOF (teardown closes the tail), so ending a session never paints a
+# KeyboardInterrupt traceback over the user's window (0.8.1 did exactly that). The live console also
+# starts us with INT/QUIT already ignored; this keeps the standalone `--render` quiet too.
+for _s in (signal.SIGINT, signal.SIGQUIT):
+    try: signal.signal(_s, signal.SIG_IGN)
+    except Exception: pass
 import sys, os, re, base64, codecs
 # A floo command marker is ONLY honored when it carries the per-session nonce (FLOO_MARK_NONCE),
 # which the client bakes into the injected shell hooks + the exec recorder and passes to this
@@ -615,7 +633,12 @@ def put(ch):
     cur[col] = ch; col += 1
 def flush_line():
     global col
-    emit(''.join(cur)); cur[:] = []; col = 0
+    line = ''.join(cur); cur[:] = []; col = 0
+    # util-linux `script` writes its own "Script started/done on <date> [COMMAND=...]" header and
+    # footer into the typescript. They are noise in the rendered views (the header even spells out
+    # the hook path), so the live pane and session.log skip them; session.raw keeps every byte.
+    if line.startswith('Script started on ') or line.startswith('Script done on '): return
+    emit(line)
 def sanitize_label(s):
     # The command label is display-only: never let it carry raw escapes to the client terminal
     # (those could overwrite the pinned status line / forge the connection indicator). Strip CSI/
@@ -728,7 +751,7 @@ def feed(text):
 pending = ""
 while True:
     try: chunk = os.read(0, 65536)
-    except OSError: break
+    except (OSError, KeyboardInterrupt): break   # INT is ignored above; this is belt-and-braces
     if not chunk: break
     pending = feed(pending + decoder.decode(chunk, final=False))
     if len(pending) > MAXSEQ * 2: pending = pending[-MAXSEQ:]      # never let a partial grow unbounded

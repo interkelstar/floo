@@ -8,10 +8,10 @@
 # else has to be typed; the code to read out loud appears on screen.
 #
 # This file is the only thing you run blind. Read the client it fetches before trusting it:
-#     https://github.com/interkelstar/floo/blob/v0.8.1/floo
+#     https://github.com/interkelstar/floo/blob/v0.8.2/floo
 # or do it by hand:  curl -fsSL https://floo.run -o floo && less floo && bash floo --public
 set -eu
-TAG="${FLOO_GO_TAG:-v0.8.1}"
+TAG="${FLOO_GO_TAG:-v0.8.2}"
 URL="https://raw.githubusercontent.com/interkelstar/floo/$TAG/floo"
 
 command -v curl >/dev/null 2>&1 || { echo "floo-sh: curl is required" >&2; exit 1; }
