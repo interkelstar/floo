@@ -8,7 +8,6 @@
 //
 //   /            -> floo            (the client, pinned tag)
 //   /sh          -> bin/floo-sh     (no-flags wrapper: fetches the tag's floo, runs --public)
-//   /go          -> the same file (the name used by v0.8.0 texts)
 //   /powder      -> bin/floo-powder (the operator script, pinned tag)
 //   /vX.Y.Z      -> floo at that tag
 //   /vX.Y.Z/powder
@@ -24,7 +23,6 @@ const FILES = {
   "powder": "bin/floo-powder",
   "floo-powder": "bin/floo-powder",
   "sh": "bin/floo-sh", // `curl -s https://floo.run/sh | bash` — no flags; exists from v0.8.1
-  "go": "bin/floo-sh", // v0.8.0 spelled it /go; kept so that text keeps working
 };
 const TAG_RE = /^v\d+\.\d+\.\d+$/;
 

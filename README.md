@@ -28,8 +28,8 @@ bash <(curl -s https://floo.run/powder) connect THE-CODE-THEY-READ
 
 `floo.run` serves the bytes of one pinned tag (v0.8.1), never `main` (the Worker behind it is in
 [`web/`](web/); `https://floo.run/version` prints the tag). `/sh` is a 23-line wrapper
-([`bin/floo-sh`](bin/floo-sh)) that fetches that tag's `floo` and starts it with `--public`; `/go` serves
-the same file for texts that quoted 0.8.0. The same thing spelled out, straight from GitHub:
+([`bin/floo-sh`](bin/floo-sh)) that fetches that tag's `floo` and starts it with `--public`. The same
+thing spelled out, straight from GitHub:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/interkelstar/floo/v0.8.1/floo | bash -s -- --public

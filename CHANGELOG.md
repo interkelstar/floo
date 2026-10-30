@@ -8,8 +8,7 @@
 
 ### Changed
 - The no-flags wrapper is `bin/floo-sh`, served at `floo.run/sh` («what you type in a terminal»):
-  `curl -s https://floo.run/sh | bash`. `floo.run/go` keeps serving the same file for texts that
-  quoted the 0.8.0 spelling.
+  `curl -s https://floo.run/sh | bash`. `floo.run/go` is gone (nobody ran the 0.8.0 spelling).
 
 ## 0.8.0 — 2026-10-29
 
