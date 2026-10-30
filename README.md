@@ -163,6 +163,10 @@ floo-powder list                     # open sessions (label + id) — situationa
 floo-powder --relay vps.example.com --pin <fp> connect <code>
 ```
 
+**Driving floo from an AI agent?** Point it at [`AGENTS.md`](AGENTS.md): it tells the agent to connect
+with `--no-shell` and work through `ssh <handle>`, never an interactive shell, plus the rules (the code
+comes from the human, nothing gets installed, everything is recorded, a quick session lasts ~30 min).
+
 When you open an interactive shell, the client sees a live command log in their `floo` window. Bash and
 zsh sessions get exact command boundaries through invisible, nonce-stamped shell markers (the bash hook
 reads the full typed line and is robust to any `PROMPT_COMMAND` shape; if the operator has shell history
