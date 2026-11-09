@@ -1,4 +1,22 @@
 # Changelog
+## Unreleased
+
+### Fixed
+- **A finished session broke the helper's own `ssh <host>`.** The helper-side alias was the box's bare
+  label (`contabo`), and floo's `Include` sits at the top of `~/.ssh/config`, where the first match
+  wins — so it shadowed the helper's own `Host contabo` and, once the session ended, every
+  `ssh contabo` failed with `floo: no live socket` until the drop-in was deleted by hand. The handle
+  is now `<label>-<first 4 of the session id>` (`contabo-3f9a`), falling back to the session id if
+  that name is taken. Regression test in `test/unit/connect_meta.sh` (red on 0.8.2). A bare-label
+  drop-in left by 0.8.2 or earlier is not renamed; `floo-powder gc` now removes it once its session
+  has ended, or remove it with `floo-powder close <label>` (or delete `~/.ssh/floo.d/<label>.conf`).
+- **`floo-powder gc` removed the routing of LIVE sessions** whose handle was a label (it compared file
+  names against the relay's sids), and treated an unreachable relay as "nothing is live" and removed
+  every drop-in. It now matches on the sid each drop-in routes to and refuses to remove anything when
+  the relay cannot be listed.
+- `test/loopback.sh` checked the released socket under the label instead of the sid, so the "socket
+  released on Ctrl-C" check could not fail.
+
 ## 0.8.2 — 2026-10-30
 
 Live-console fixes found by running the published commands on a Debian box (the dev box is Fedora

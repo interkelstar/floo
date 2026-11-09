@@ -41,7 +41,7 @@ cleanup() {
   [ -n "$RELAY_PID" ] && kill -TERM "-$RELAY_PID" 2>/dev/null
   pkill -f "$WORK" 2>/dev/null
   sudo rm -rf "$HELPBIN" 2>/dev/null
-  rm -rf "$WORK" "$RUN" "$HOME/.config/floo/sessions/testbot" "$HOME/.ssh/floo.d/testbot.conf" "$HOME/.floo-last-session" 2>/dev/null
+  rm -rf "$WORK" "$RUN" "$HOME"/.config/floo/sessions/testbot-* "$HOME"/.ssh/floo.d/testbot-*.conf "$HOME/.floo-last-session" 2>/dev/null
   sed -i '/127.0.0.1/d' "$HOME/.config/floo/relay_known_hosts" 2>/dev/null || true  # drop test relay pins
 }
 trap cleanup EXIT
@@ -132,7 +132,7 @@ env -i HOME="$OPHOME" PATH="$PATH" FLOO_HOME="$OPHOME/.config/floo" \
 
 OUT="$(env -i HOME="$OPHOME" PATH="$PATH" FLOO_HOME="$OPHOME/.config/floo" \
     FLOO_RELAY_HOST=127.0.0.1 FLOO_RELAY_PORT="$PORT" FLOO_RELAY_USER="$ME" \
-    "$REPO/bin/floo-powder" exec testbot 2>"$WORK/exec.err" <<<'echo MARKER_$((6*7)); id -un' )"
+    "$REPO/bin/floo-powder" exec "testbot-${SID:0:4}" 2>"$WORK/exec.err" <<<'echo MARKER_$((6*7)); id -un' )"
 grep -q 'MARKER_42' <<<"$OUT" && ok "operator ran a command on the box via the relay pivot (cert auth)" \
   || { bad "exec over the pivot did not return expected output"; echo "--- out:"; echo "$OUT"; echo "--- err:"; cat "$WORK/exec.err"; echo "--- client sshd.log:"; tail -15 "$RUN"/floo/testbot/sshd.log 2>/dev/null; }
 
@@ -178,8 +178,8 @@ for _ in $(seq 1 50); do kill -0 "$CLIENT_PID" 2>/dev/null || break; sleep 0.2; 
 kill -0 "$CLIENT_PID" 2>/dev/null && { bad "client did not exit after Ctrl-C"; kill -KILL "$CLIENT_PID" 2>/dev/null; } || ok "client exited on Ctrl-C and ran teardown"
 CLIENT_PID=""
 
-for _ in $(seq 1 15); do [ -S "$SOCK/testbot.sock" ] || break; sleep 0.2; done   # async unlink
-[ -S "$SOCK/testbot.sock" ] && bad "relay socket STILL present after revoke" || ok "relay socket released (close = revoke)"
+for _ in $(seq 1 15); do [ -S "$SOCK/$SID.sock" ] || break; sleep 0.2; done   # async unlink (sockets are named by sid)
+[ -S "$SOCK/$SID.sock" ] && bad "relay socket STILL present after revoke" || ok "relay socket released (close = revoke)"
 # no orphaned throwaway sshd / tunnel left behind
 if pgrep -af "floo/testbot" 2>/dev/null | grep -q sshd; then bad "orphaned throwaway sshd survived teardown"; else ok "no orphaned sshd/tunnel after teardown"; fi
 # the surface state-diff verdict was produced and matches reality
@@ -189,7 +189,7 @@ else
   grep -q 'unchanged' "$WORK/client.log" && ok "teardown reported the attack surface UNCHANGED (no false positive)" || { bad "no clean state-diff verdict on exit"; tail -8 "$WORK/client.log"; }
 fi
 # the operator's cert really is short-lived
-CERT="$HOME/.config/floo/sessions/testbot/opkey-cert.pub"
+CERT="$HOME/.config/floo/sessions/testbot-${SID:0:4}/opkey-cert.pub"
 [ -f "$CERT" ] && ssh-keygen -Lf "$CERT" | grep -q 'Valid:.*to' && ok "operator cert is time-boxed (≤60m)" || note "cert file already cleaned"
 
 # ── 8. saved recording: raw .raw is the COMPLETE record; .log is the readable rendered log ───

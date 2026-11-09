@@ -168,9 +168,16 @@ cmd_connect() {
   validate_meta
   echo "${G}✓ code matches — this is the genuine session (resolved at the relay)${X}"
 
-  # friendly handle: the client's label if it's free, else the sid (both unique on this operator box)
+  # friendly handle: <label>-<first 4 of sid>, else the sid. Never the bare label: our Include sits at
+  # the TOP of ~/.ssh/config and ssh_config is first-match-wins, so a bare `Host contabo` silently
+  # shadowed the operator's own `Host contabo` — and kept shadowing it (relay: "no live socket") after
+  # the session ended, until the drop-in was removed by hand. The suffix keeps the alias out of the
+  # namespace people use for their own hosts. (validate_meta caps label at 40, so this fits valid_handle.)
   local handle="$sid"
-  [ -n "$label" ] && [ ! -e "$SSH_DROPIN_DIR/$label.conf" ] && handle="$label"
+  if [ -n "$label" ]; then
+    handle="$label-${sid:0:4}"
+    [ -e "$SSH_DROPIN_DIR/$handle.conf" ] && handle="$sid"
+  fi
 
   ensure_ssh_wiring
   local sdir="$FLOO_HOME/sessions/$handle"; rm -rf "$sdir"; mkdir -p "$sdir"; chmod 700 "$sdir"
@@ -252,11 +259,16 @@ cmd_close() {
 }
 
 cmd_gc() {
-  local live; live="$(relay_ssh list 2>/dev/null | cut -f1 || true)"
+  # Fail closed: an unreachable relay must not read as "no live sessions" and wipe every drop-in.
+  local live; live="$(relay_ssh list 2>/dev/null)" || die "gc: could not list live sessions at the relay — nothing removed."
+  live="$(cut -f1 <<<"$live")"
   shopt -s nullglob
   for conf in "$SSH_DROPIN_DIR"/*.conf; do
-    local bn; bn="$(basename "${conf%.conf}")"
-    if ! grep -qx "$bn" <<<"$live"; then rm -f "$conf"; rm -rf "$FLOO_HOME/sessions/$bn"; echo "gc: dropped stale '$bn'"; fi
+    # `list` speaks sids; a handle is usually <label>-<sid4>, so match on the sid the drop-in routes to
+    # (the ProxyCommand's `route <sid>`), falling back to the file name for a bare-sid handle.
+    local bn sid; bn="$(basename "${conf%.conf}")"
+    sid="$(grep -oE 'route "?[a-f0-9]{16}' "$conf" | grep -oE '[a-f0-9]{16}' | head -1 || true)"
+    if ! grep -qx "${sid:-$bn}" <<<"$live"; then rm -f "$conf"; rm -rf "$FLOO_HOME/sessions/$bn"; echo "gc: dropped stale '$bn'"; fi
   done
   echo "gc done."
 }

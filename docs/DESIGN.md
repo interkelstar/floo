@@ -67,6 +67,8 @@ code+pin prove box→operator. Mutual.
   - `opconfig` → serve the operator's **public** CA (so a pin-bootstrapped client fetches it over the host-key-verified relay instead of pasting it)
 - operator transport: `bin/floo-powder connect` writes `~/.ssh/floo.d/<name>.conf` with a
   `ProxyCommand ssh … gw@relay route <sid>`; then plain `ssh <name>` / `rsync … <name>:` work.
+  `<name>` is `<label>-<first 4 of sid>` (the bare sid if taken) — never the bare label, which would
+  shadow the operator's own `Host <label>` (the Include is prepended; ssh_config is first-match-wins).
 
 ## Lifecycle
 

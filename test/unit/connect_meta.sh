@@ -26,12 +26,14 @@ for a in "$@"; do
     resolve) cat "$META_REPLY_FILE"; exit 0 ;;
     bindop) echo "bound"; exit 0 ;;
     floo-probe) exit 0 ;;
+    list) [ -n "${LIST_FAIL:-}" ] && exit 255; cat "$LIST_REPLY_FILE"; exit 0 ;;
   esac
 done
 exit 0
 STUB
 chmod +x "$STUBDIR/ssh"
 export META_REPLY_FILE="$META"
+export LIST_REPLY_FILE="$STUBDIR/list_reply"
 export PATH="$STUBDIR:$PATH"
 
 run_connect() {
@@ -117,8 +119,40 @@ hostkey=ssh-ed25519 AAAAB3NzaC1lZDI1NTE5AAAA
 M
 out="$(run_connect 2>&1)"; rc=$?
 [ "$rc" -eq 0 ] && ok "clean reply: connect succeeds" || bad "clean reply: rc=$rc out=$out"
-[ -f "$H/.ssh/floo.d/goodlabel.conf" ] && ok "clean reply: drop-in written under the label" || bad "clean reply: no drop-in"
-grep -q '^Host goodlabel$' "$H/.ssh/floo.d/goodlabel.conf" 2>/dev/null && ok "clean reply: drop-in has the expected Host line" || bad "clean reply: drop-in missing Host line"
+[ -f "$H/.ssh/floo.d/goodlabel-a1b2.conf" ] && ok "clean reply: drop-in written under <label>-<sid4>" || bad "clean reply: no drop-in"
+grep -q '^Host goodlabel-a1b2$' "$H/.ssh/floo.d/goodlabel-a1b2.conf" 2>/dev/null && ok "clean reply: drop-in has the expected Host line" || bad "clean reply: drop-in missing Host line"
+# the bare label must never become a Host alias: it would shadow the operator's own `Host <label>`
+# in ~/.ssh/config (our Include is prepended; first match wins) and keep shadowing it after the session
+[ ! -e "$H/.ssh/floo.d/goodlabel.conf" ] && ! grep -rqx 'Host goodlabel' "$H/.ssh/floo.d" 2>/dev/null \
+  && ok "clean reply: no bare-label Host alias (cannot shadow the operator's own host)" || bad "clean reply: a bare-label Host alias was written"
+grep -q 'goodlabel-a1b2' <<<"$out" && ok "clean reply: the banner names the suffixed handle" || bad "clean reply: banner does not show goodlabel-a1b2: $out"
+
+# (f) a second connect to the SAME session finds its handle taken → falls back to the sid (no overwrite)
+out="$(run_connect 2>&1)"; rc=$?
+{ [ "$rc" -eq 0 ] && [ -f "$H/.ssh/floo.d/a1b2c3d4e5f60718.conf" ]; } && ok "handle taken: falls back to the sid" || bad "handle taken: rc=$rc out=$out"
+[ -f "$H/.ssh/floo.d/goodlabel-a1b2.conf" ] && ok "handle taken: the first drop-in is kept" || bad "handle taken: the first drop-in was removed"
+
+echo "=== gc: keeps live sessions whatever their handle, fails closed ==="
+run_gc() { env HOME="$H" FLOO_HOME="$FH" FLOO_RELAY_HOST=relay.test FLOO_RELAY_PORT=443 "$OP" gc; }
+printf 'a1b2c3d4e5f60718\tsocket=live\tlabel=goodlabel\tregistered=x\n' > "$LIST_REPLY_FILE"
+out="$(run_gc 2>&1)"; rc=$?
+{ [ "$rc" -eq 0 ] && [ -f "$H/.ssh/floo.d/goodlabel-a1b2.conf" ] && [ -f "$H/.ssh/floo.d/a1b2c3d4e5f60718.conf" ]; } \
+  && ok "gc: a live session's <label>-<sid4> and sid drop-ins are kept" || bad "gc dropped a live session: rc=$rc out=$out"
+out="$(LIST_FAIL=1 run_gc 2>&1)"; rc=$?
+{ [ "$rc" -ne 0 ] && [ -f "$H/.ssh/floo.d/goodlabel-a1b2.conf" ]; } && ok "gc: relay unreachable → nothing removed, non-zero exit" || bad "gc with failed list: rc=$rc out=$out"
+: > "$LIST_REPLY_FILE"
+out="$(run_gc 2>&1)"; rc=$?
+{ [ "$rc" -eq 0 ] && [ "$(drop_in_count)" -eq 0 ] && [ ! -e "$FH/sessions/goodlabel-a1b2" ]; } \
+  && ok "gc: an ended session's drop-ins and session dir are removed" || bad "gc kept a dead session: rc=$rc out=$out"
+
+# (g) a max-length label (40, validate_meta's cap) still yields a handle exec/close accept
+long="$(printf 'L%.0s' $(seq 1 40))"
+sed -i "s/^label=.*/label=$long/" "$META"
+out="$(run_connect 2>&1)"; rc=$?
+h="$long-a1b2"
+{ [ "$rc" -eq 0 ] && [ -f "$H/.ssh/floo.d/$h.conf" ]; } && ok "40-char label: handle written (${#h} chars)" || bad "40-char label: rc=$rc out=$out"
+env HOME="$H" FLOO_HOME="$FH" "$OP" close "$h" >/dev/null 2>&1 && [ ! -e "$H/.ssh/floo.d/$h.conf" ] \
+  && ok "40-char label: close accepts the handle" || bad "40-char label: close rejected the handle"
 
 echo; echo "=== $P passed, $F failed ==="
 [ "$F" -eq 0 ]

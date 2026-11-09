@@ -33,11 +33,12 @@ bash <(curl -s https://floo.run/powder) connect THE-CODE --no-shell
 establishes the session and exits, printing a line like:
 
 ```
-✓ session ready — ssh vps-dev / rsync … vps-dev: / floo-powder exec vps-dev
+✓ session ready — ssh vps-dev-3f9a / rsync … vps-dev-3f9a: / floo-powder exec vps-dev-3f9a
 ```
 
-Take the **handle** from that line (here `vps-dev`; it is the machine's label, or a session id
-if the label is taken). Everything below uses it. If the code was wrong or the relay was
+Take the **handle** from that line (here `vps-dev-3f9a`: the machine's label plus the first four
+characters of the session id, so it never collides with a `Host` of your own; a bare session id
+if that name is taken). It is new for every session. Everything below uses it. If the code was wrong or the relay was
 unreachable, `connect` exits non-zero and says so — stop and tell the human, don't retry blindly.
 
 `✓ session ready` is printed even if the link did not come up. **Your real check is the first
@@ -50,9 +51,9 @@ Because you fetched the tool with `bash <(curl …)` and installed nothing, ther
 needs no install:
 
 ```sh
-ssh vps-dev 'hostname; uptime'            # one command, output comes back to you
-ssh vps-dev 'bash -s' < script.sh         # run a whole script non-interactively
-rsync -a ./build/ vps-dev:/srv/app/       # files, if you need them
+ssh vps-dev-3f9a 'hostname; uptime'            # one command, output comes back to you
+ssh vps-dev-3f9a 'bash -s' < script.sh         # run a whole script non-interactively
+rsync -a ./build/ vps-dev-3f9a:/srv/app/       # files, if you need them
 ```
 
 Every command you run is shown live in the person's floo window and written to a recording on
@@ -68,7 +69,7 @@ The person's access ends the moment they press Ctrl-C (or close the window) — 
 revoke, and you cannot keep the session alive past it. Tidying your own side is optional:
 
 ```sh
-bash <(curl -s https://floo.run/powder) close vps-dev   # drops your local routing drop-in
+bash <(curl -s https://floo.run/powder) close vps-dev-3f9a   # drops your local routing drop-in
 ```
 
 ## Rules for you

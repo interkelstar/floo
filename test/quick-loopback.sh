@@ -29,7 +29,7 @@ cleanup() {
   pkill -f "$WORK" 2>/dev/null
   sudo rm -rf "$HELPBIN" 2>/dev/null
   rm -rf "$WORK" "$RUN" 2>/dev/null
-  for f in "$HOME"/.ssh/floo.d/qbox.conf "$HOME"/.config/floo/sessions/qbox; do rm -rf "$f" 2>/dev/null; done
+  for f in "$HOME"/.ssh/floo.d/qbox-*.conf "$HOME"/.config/floo/sessions/qbox-*; do rm -rf "$f" 2>/dev/null; done
   sed -i '/127.0.0.1/d' "$HOME/.config/floo/relay_known_hosts" 2>/dev/null || true
 }
 trap cleanup EXIT
@@ -134,7 +134,7 @@ timeout 25 env -i HOME="$OPHOME" PATH="$PATH" FLOO_HOME="$OPHOME/.config/floo" \
 
 OUT="$(env -i HOME="$OPHOME" PATH="$PATH" FLOO_HOME="$OPHOME/.config/floo" \
     FLOO_RELAY_HOST=127.0.0.1 FLOO_RELAY_PORT="$PORT" FLOO_RELAY_USER="$ME" \
-    "$REPO/bin/floo-powder" exec qbox 2>"$WORK/exec.err" <<<'echo QMARK_$((6*7))' )"
+    "$REPO/bin/floo-powder" exec "qbox-${SID:0:4}" 2>"$WORK/exec.err" <<<'echo QMARK_$((6*7))' )"
 grep -q 'QMARK_42' <<<"$OUT" && ok "BOT-operator (exec) ran a command over the no-cert pivot (HMAC-bound key)" \
   || { bad "exec over the quick pivot failed"; echo "$OUT"; cat "$WORK/exec.err"; tail -15 "$RUN"/floo/qbox/sshd.log 2>/dev/null; }
 
@@ -155,7 +155,7 @@ REC_RAW="$RUN/floo/qbox/recording/session.raw"
   printf 'echo IMARK_$((6*7))\n'
   for _ in $(seq 1 60); do grep -aq 'IMARK_42' "$REC_RAW" 2>/dev/null && break; sleep 0.25; done
   printf 'exit\n'; sleep 0.5; } \
-  | timeout 45 env HOME="$OPHOME" PATH="$PATH" ssh -tt -o BatchMode=yes qbox >"$WORK/interactive.log" 2>&1 || true
+  | timeout 45 env HOME="$OPHOME" PATH="$PATH" ssh -tt -o BatchMode=yes "qbox-${SID:0:4}" >"$WORK/interactive.log" 2>&1 || true
 sleep 0.3
 grep -q 'IMARK_42' "$WORK/interactive.log" && ok "MANUAL-operator interactive shell ran (live output seen)" \
   || { bad "interactive shell produced no output"; cat "$WORK/interactive.log"; }
